@@ -273,6 +273,7 @@ export interface Candidate {
   salary: number       // зарплатные ожидания, грн/мес
   cur?: 'uah'          // валюта партии: гривна (старые «рублёвые» сохранения пересчитываются)
   tagline: string      // психологический портрет (вторичен при найме)
+  super?: boolean      // суперуправленец — ходячий эталон должности (редкость на рынке)
 }
 
 /** Режимы рынка: сколько кандидатов доступно из 16 типов */
@@ -437,6 +438,92 @@ export function rerollBench(pool: Candidate[], team: Record<string, string | nul
 export function absentTypes(pool: Candidate[]): string[] {
   const present = new Set(pool.map((c) => c.ru))
   return TYPES.filter((t) => !present.has(t.ru)).map((t) => t.ru)
+}
+
+// ---------- ЭТАЛОН: команда мечты и Суперуправленец ----------
+//
+// Отзыв игрока: «для соревнования надо иметь суперуправленца как
+// эталон, к которому надо стремиться». Отсюда две механики:
+//   • у каждой должности есть эталон — сильнейший тип, 20 лет
+//     в профессии и MBA; панель «Эталон» показывает, насколько
+//     текущий штат дотягивает до идеала (в %);
+//   • раз в несколько месяцев на рынок может выйти живой
+//     суперуправленец — резюме уровня эталона, но за 45%
+//     дороже рынка. Нанять его — маленький праздник и рывок
+//     команды к мечте.
+
+/** Лучший соционический тип для должности — эталон психологии */
+export function idealTypeFor(post: Post): SocioType {
+  let best = TYPES[0]
+  for (const t of TYPES) if (postFit(t, post) > postFit(best, post)) best = t
+  return best
+}
+
+/** Идеальное резюме на должность: сильнейший тип, 20 лет в сфере, MBA */
+export function idealCandidate(post: Post): Candidate {
+  const t = idealTypeFor(post)
+  const ideal: Candidate = {
+    ru: t.ru,
+    name: 'Эталон',
+    age: 50,
+    years: 20,
+    profession: post.id,
+    education: 'MBA',
+    achievement: ACHIEVEMENTS[post.id][0],
+    salary: 0,
+    cur: 'uah',
+    tagline: CANDIDATE_TAGLINES[t.ru] ?? 'специалист',
+  }
+  ideal.salary = salaryFor(profFit(ideal, post), ideal.years, post.id)
+  return ideal
+}
+
+/** Строка эталонной таблицы: что требуется и что есть сейчас */
+export interface IdealRow {
+  post: Post
+  /** эталонный тип (рус. аббревиатура) */
+  idealType: string
+  /** итоговый рейтинг эталона (обычно около 90%) */
+  idealFit: number
+  /** эталонная зарплата, грн/мес */
+  idealSalary: number
+  /** итоговый рейтинг текущего сотрудника (0 — вакансия) */
+  curFit: number
+  /** насколько текущий человек дотягивает до эталона, % */
+  pct: number
+}
+
+/**
+ * Штат против эталона: по каждой должности и в среднем.
+ * Вакансия — это 0% от эталона: пустое кресло всегда дальше всех от мечты.
+ */
+export function teamVsIdeal(cabinet: Cabinet, pool: Candidate[]): {
+  rows: IdealRow[]
+  avgPct: number
+  idealPayroll: number
+} {
+  const rows: IdealRow[] = []
+  let idealPayroll = 0
+  for (const post of POSTS) {
+    const ideal = idealCandidate(post)
+    const idealFit = overallFit(ideal, post)
+    idealPayroll += ideal.salary
+    const ru = cabinet[post.id]
+    const emp = ru ? pool.find((c) => c.ru === ru) : null
+    const curFit = emp ? overallFit(emp, post) : 0
+    rows.push({
+      post,
+      idealType: ideal.ru,
+      idealFit,
+      idealSalary: ideal.salary,
+      curFit,
+      pct: idealFit > 0 ? Math.round((curFit / idealFit) * 100) : 0,
+    })
+  }
+  const avgPct = rows.length
+    ? Math.round(rows.reduce((s, r) => s + r.pct, 0) / rows.length)
+    : 0
+  return { rows, avgPct, idealPayroll }
 }
 
 // ---------- Команда и симуляция ----------
@@ -888,6 +975,37 @@ export const VACANCY_FINE_STEP = 30_000
 /** Потолок месячного штрафа за одну вакансию */
 export const VACANCY_FINE_CAP = 300_000
 
+/** Шанс, что в месяце на рынок выйдет суперуправленец */
+export const SUPER_CHANCE = 0.12
+/** Насколько дороже рынка просит суперуправленец */
+export const SUPER_SALARY_MULT = 1.45
+
+/**
+ * Собрать суперуправленца на должность: сильнейший тип, 20+ лет
+ * в своей сфере, MBA — резюме, равное эталону. Просит в 1,45 раза
+ * больше рынка: мечта всегда дорога.
+ */
+function makeSuper(post: Post, names: Set<string>): Candidate {
+  const t = idealTypeFor(post)
+  const c: Candidate = {
+    ru: t.ru,
+    name: randomName(names),
+    age: 48 + Math.floor(Math.random() * 8),
+    years: 20 + Math.floor(Math.random() * 6),
+    profession: post.id,
+    education: 'MBA',
+    achievement: ACHIEVEMENTS[post.id][ACHIEVEMENTS[post.id].length - 1],
+    salary: 0,
+    cur: 'uah',
+    tagline: CANDIDATE_TAGLINES[t.ru] ?? 'специалист',
+    super: true,
+  }
+  c.salary = Math.round(
+    (salaryFor(profFit(c, post), c.years, post.id) * SUPER_SALARY_MULT) / 1000,
+  ) * 1000
+  return c
+}
+
 /** Конъюнктура спроса покупателей на месяц */
 export type DemandMode = 'boom' | 'steady' | 'slump'
 
@@ -1022,7 +1140,13 @@ function rollLabor(): MarketMode {
 function newBench(game: LiveGame): Candidate[] {
   const busy = POSTS.map((p) => game.slots[p.id]?.ru).filter((x): x is string => !!x)
   const fresh = generateMarket(game.labor, busy)
-  return fresh.slice(0, LIVE_BENCH_SIZE[game.labor])
+  const picked = fresh.slice(0, LIVE_BENCH_SIZE[game.labor])
+  // Суперуправленец — редкий гость: с месяца 2 он может выйти на рынок
+  if (game.month >= 2 && Math.random() < SUPER_CHANCE) {
+    const post = POSTS[Math.floor(Math.random() * POSTS.length)]
+    picked.push(makeSuper(post, new Set(game.roster.map((c) => c.name))))
+  }
+  return picked
 }
 
 /**
@@ -1136,10 +1260,12 @@ export function hireCandidate(game: LiveGame, ru: string, postId: string): LiveA
   const bench = game.bench.filter((x) => x !== ru)
   const slots = { ...game.slots, [postId]: { ru, vacantMonths: 0 } }
   const next: LiveGame = { ...game, cash: game.cash - cost.total, slots, roster, bench }
-  const text = cost.replacing && old
-    ? `«${post.title}»: ${old.name} уходит (секверанс ${fmtMoney(cost.severance)}), кресло принимает ${cand.name} (${cand.ru}) — подъёмные ${fmtMoney(cost.bonus)}`
-    : `«${post.title}»: кресло принимает ${cand.name} (${cand.ru}, ${fmtMoney(cand.salary)}/мес) — подъёмные ${fmtMoney(cost.bonus)}`
-  return { game: next, event: { text, kind: cost.replacing ? 'neutral' : 'good' } }
+  const text = cand.super
+    ? `🦸 «${post.title}» принимает эталон: ${cand.name} (${cand.ru}) за ${fmtMoney(cand.salary)}/мес — подъёмные ${fmtMoney(cost.bonus)}. Команда шагнула к мечте`
+    : cost.replacing && old
+      ? `«${post.title}»: ${old.name} уходит (секверанс ${fmtMoney(cost.severance)}), кресло принимает ${cand.name} (${cand.ru}) — подъёмные ${fmtMoney(cost.bonus)}`
+      : `«${post.title}»: кресло принимает ${cand.name} (${cand.ru}, ${fmtMoney(cand.salary)}/мес) — подъёмные ${fmtMoney(cost.bonus)}`
+  return { game: next, event: { text, kind: cost.replacing && !cand.super ? 'neutral' : 'good' } }
 }
 
 /** Уволить сотрудника с должности: секверанс, кресло становится вакансией */
@@ -1237,6 +1363,15 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const interim: LiveGame = { ...game, month, cash, labor, demand, slots, roster: employeesOnly, bench: [], history }
   const fresh = finished ? [] : newBench(interim)
   const next: LiveGame = { ...interim, roster: [...employeesOnly, ...fresh], bench: fresh.map((c) => c.ru) }
+  // Выход суперуправленца — событие месяца: мимо такой новости пройти нельзя
+  const star = fresh.find((c) => c.super)
+  if (star) {
+    const post = POSTS.find((p) => p.id === star.profession)!
+    next.history[next.history.length - 1].events.push({
+      text: `🦸 Эталон на рынке: ${star.name} (${star.ru}) смотрит на «${post.title}» и просит ${fmtMoney(star.salary)}/мес — в 1,45 раза выше рынка. Такие бывают раз в год`,
+      kind: 'good',
+    })
+  }
   return { game: next, finished }
 }
 
