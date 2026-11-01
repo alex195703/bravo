@@ -25,6 +25,7 @@ import {
   POSTS, CRISES, MARKET_MODES, EMPTY_TEAM, PAYROLL_BUDGET,
   postFit, fitStars, profFit, overallFit, bestPostForCandidate,
   payroll, simulateCrisis, buildReport, cohesion, fmtMoney,
+  companyValue, postContribution, fmtValue, VACANCY_VALUE_PENALTY,
   generateMarket, rerollBench, absentTypes, autoAssemble, normalizeCandidate,
   type Candidate, type MarketMode, type Cabinet, type CrisisResult, type RankInfo,
 } from '@/lib/bravo'
@@ -64,6 +65,11 @@ function fitBadgeClass(fit: number): string {
   return fit >= 75 ? FIT_BADGE.high : fit >= 55 ? FIT_BADGE.mid : FIT_BADGE.low
 }
 
+/** «+2,6 млн грн» / «−1,2 млн грн» — вклад в стоимость со знаком */
+function signedMoney(n: number): string {
+  return n >= 0 ? `+${fmtValue(n)}` : `−${fmtValue(Math.abs(n))}`
+}
+
 export default function BravoSimulator() {
   const [phase, setPhase] = useState<Phase>('market')
   const [intl, setIntl] = useState(false)
@@ -74,7 +80,7 @@ export default function BravoSimulator() {
   const [results, setResults] = useState<Record<string, CrisisResult>>({})
   const [selectedPair, setSelectedPair] = useState<[string, string] | null>(null)
   const [report, setReport] = useState<RankInfo | null>(null)
-  const [best, setBest] = useState<{ overall: number; rank: string } | null>(null)
+  const [best, setBest] = useState<{ overall: number; rank: string; value?: number } | null>(null)
   const [isNewBest, setIsNewBest] = useState(false)
   const hydrated = useRef(false)
 
@@ -115,7 +121,7 @@ export default function BravoSimulator() {
         }
         if (!restored) setPool(generateMarket('normal'))
         const rawBest = localStorage.getItem(BEST_KEY) ?? localStorage.getItem(LEGACY_BEST_KEY)
-        if (rawBest) setBest(JSON.parse(rawBest) as { overall: number; rank: string })
+        if (rawBest) setBest(JSON.parse(rawBest) as { overall: number; rank: string; value?: number })
         // Зачищаем ключи старой версии («Чудо»): рекорд переносим под новый
         // ключ, партия при первом же изменении перезапишется автосохранением
         try {
@@ -201,7 +207,7 @@ export default function BravoSimulator() {
     const newBest = !best || rep.overall > best.overall
     setIsNewBest(newBest)
     if (newBest) {
-      const record = { overall: rep.overall, rank: rep.rank }
+      const record = { overall: rep.overall, rank: rep.rank, value: rep.value?.total }
       setBest(record)
       try {
         localStorage.setItem(BEST_KEY, JSON.stringify(record))
@@ -261,6 +267,9 @@ export default function BravoSimulator() {
 
   const cohesionValue = useMemo(() => cohesion(team), [team])
 
+  // Пульс сети: стоимость компании пересчитывается на каждом решении
+  const pulse = useMemo(() => companyValue(team, pool, mode), [team, pool, mode])
+
   const selectedRel = useMemo(() => {
     if (!selectedPair) return null
     const a = typeByRu(selectedPair[0])
@@ -309,7 +318,8 @@ export default function BravoSimulator() {
               и лишь потом психологические особенности. Итоговый рейтинг кандидата
               = <b>65% профпригодность + 35% соответствие типа должности</b>. Но рынок труда
               живёт по своим правилам: соискатели не покрывают всю палитру из 16 типов —
-              <b> приходится набирать из того, что есть</b>.
+              <b> приходится набирать из того, что есть</b>. Каждое кадровое решение
+              теперь видно в деньгах: следите за «Пульсом сети» — стоимостью компании.
             </p>
           </section>
 
@@ -399,7 +409,7 @@ export default function BravoSimulator() {
                 </button>
                 {best && (
                   <span className="ml-auto text-sm text-slate-500">
-                    Рекорд: <b>{best.overall}%</b> (ранг {best.rank})
+                    Рекорд: <b>{best.overall}%</b> (ранг {best.rank}{best.value ? ` · ${fmtValue(best.value)}` : ''})
                   </span>
                 )}
               </div>
@@ -440,6 +450,28 @@ export default function BravoSimulator() {
               <Bar title="Сплочённость" value={report.cohesionValue} hint="по парам менеджеров" color="bg-amber-500" />
             </div>
           </section>
+
+          {report.value && (
+            <section aria-label="Пульс сети: стоимость компании" className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-semibold text-slate-800">💹 Пульс сети — стоимость компании</h2>
+                <p className="text-2xl sm:text-3xl font-black text-slate-800">{fmtValue(report.value.total)}</p>
+              </div>
+              <ul className="mt-3 divide-y divide-slate-100">
+                {report.value.parts.map((part) => (
+                  <li key={part.label} className="flex items-baseline justify-between gap-3 py-1.5 text-sm">
+                    <span className="text-slate-600">
+                      {part.label}
+                      {part.hint && <span className="text-slate-400"> · {part.hint}</span>}
+                    </span>
+                    <b className={part.label === 'База сети' ? 'text-slate-800' : part.amount < 0 ? 'text-rose-600' : 'text-emerald-700'}>
+                      {part.label === 'База сети' ? fmtValue(part.amount) : signedMoney(part.amount)}
+                    </b>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {report.mode && (
             <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
@@ -494,7 +526,8 @@ export default function BravoSimulator() {
                     <th className="py-2 pr-3 font-medium">Человек</th>
                     <th className="py-2 pr-3 font-medium">Квадра</th>
                     <th className="py-2 pr-3 font-medium">Профиль</th>
-                    <th className="py-2 font-medium">Итог</th>
+                    <th className="py-2 pr-3 font-medium">Итог</th>
+                    <th className="py-2 font-medium">Вклад в стоимость</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -524,8 +557,15 @@ export default function BravoSimulator() {
                         <td className="py-2 pr-3 text-slate-600">
                           {cand ? `${field} · стаж ${cand.years} лет` : '—'}
                         </td>
-                        <td className="py-2">
+                        <td className="py-2 pr-3">
                           {cand ? `${fitStars(blended)} ${blended}% (проф ${prof} · соц ${soc})` : '—'}
+                        </td>
+                        <td className="py-2">
+                          {report.value
+                            ? cand
+                              ? <b className="text-emerald-700">{signedMoney(report.value.perPost.find((x) => x.post.id === p.id)?.contribution ?? 0)}</b>
+                              : <b className="text-rose-500">{signedMoney(-VACANCY_VALUE_PENALTY)}</b>
+                            : '—'}
                         </td>
                       </tr>
                     )
@@ -576,25 +616,37 @@ export default function BravoSimulator() {
             {intlBtn}
           </header>
 
-          <section className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-5">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-              <span className="text-slate-600">Команда: <b className="text-slate-800">{filled}/{POSTS.length}</b></span>
-              <span className="text-slate-600">В запасе: <b className="text-slate-800">{bench.length}</b></span>
-              <span className="text-slate-600">Рынок: <b className="text-slate-800">{MARKET_MODES[mode].label}</b></span>
-              <span className="text-slate-600">
-                ФОТ: <b className={payrollOverPct > 0 ? 'text-rose-600' : 'text-slate-800'}>{fmtMoney(hiringPayroll)}</b>
-                <span className="text-slate-400"> из {fmtMoney(PAYROLL_BUDGET)}</span>
-              </span>
-              {payrollOverPct > 0 && (
-                <span className="rounded-lg bg-rose-100 border border-rose-300 text-rose-700 px-2.5 py-1 text-xs font-medium">
-                  Перерасход ФОТ: +{payrollOverPct}% к бюджету
+          <section aria-label="Пульс сети: стоимость компании" className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">💹 Пульс сети — стоимость компании</p>
+                <p className="mt-0.5 text-3xl sm:text-4xl font-black text-slate-800">{fmtValue(pulse.total)}</p>
+                <p className="mt-1 max-w-md text-xs leading-relaxed text-slate-400">
+                  база {fmtValue(pulse.base)} · команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
+                  {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
+                  {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
+                  <span className="block">каждое назначение меняет деньги сразу — смотрите вклад в карточках должностей</span>
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                <span className="text-slate-600">Команда: <b className="text-slate-800">{filled}/{POSTS.length}</b></span>
+                <span className="text-slate-600">В запасе: <b className="text-slate-800">{bench.length}</b></span>
+                <span className="text-slate-600">Рынок: <b className="text-slate-800">{MARKET_MODES[mode].label}</b></span>
+                <span className="text-slate-600">
+                  ФОТ: <b className={payrollOverPct > 0 ? 'text-rose-600' : 'text-slate-800'}>{fmtMoney(hiringPayroll)}</b>
+                  <span className="text-slate-400"> из {fmtMoney(PAYROLL_BUDGET)}</span>
                 </span>
-              )}
-              {vacantCount > 0 && (
-                <span className="rounded-lg bg-amber-100 border border-amber-300 text-amber-700 px-2.5 py-1 text-xs font-medium">
-                  Внимание: {vacantCount === 1 ? 'должность останется пустой' : `${vacantCount} должностей останутся пустыми`}
-                </span>
-              )}
+                {payrollOverPct > 0 && (
+                  <span className="rounded-lg bg-rose-100 border border-rose-300 text-rose-700 px-2.5 py-1 text-xs font-medium">
+                    Перерасход ФОТ: +{payrollOverPct}% к бюджету
+                  </span>
+                )}
+                {vacantCount > 0 && (
+                  <span className="rounded-lg bg-amber-100 border border-amber-300 text-amber-700 px-2.5 py-1 text-xs font-medium">
+                    Внимание: {vacantCount === 1 ? 'должность останется пустой' : `${vacantCount} должностей останутся пустыми`}
+                  </span>
+                )}
+              </div>
             </div>
           </section>
 
@@ -656,11 +708,15 @@ export default function BravoSimulator() {
                       <b>{fitStars(blended)}</b>
                       <span>итог {blended}%</span>
                       <span className="text-xs opacity-70">проф {prof}% · соционика {soc}%</span>
+                      <span className="text-xs font-semibold">· вклад {signedMoney(postContribution(blended, mode))}</span>
                     </div>
                   ) : (
-                    <p className="mt-2 text-xs text-slate-400">
-                      Лучшие по итоговому рейтингу: {top.map((x) => `${x.c.name} ${x.fit}%`).join(' · ')}
-                    </p>
+                    <div className="mt-2">
+                      <p className="text-xs font-medium text-rose-500">Вакансия бьёт по стоимости: {signedMoney(-VACANCY_VALUE_PENALTY)}</p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        Лучшие по итоговому рейтингу: {top.map((x) => `${x.c.name} ${x.fit}%`).join(' · ')}
+                      </p>
+                    </div>
                   )}
                 </article>
               )
@@ -708,7 +764,7 @@ export default function BravoSimulator() {
             </button>
             {best && (
               <span className="ml-auto text-sm text-slate-500">
-                Рекорд: <b>{best.overall}%</b> (ранг {best.rank})
+                Рекорд: <b>{best.overall}%</b> (ранг {best.rank}{best.value ? ` · ${fmtValue(best.value)}` : ''})
               </span>
             )}
           </div>
@@ -756,6 +812,14 @@ export default function BravoSimulator() {
           <p className={`mt-2 text-xs ${hqPayrollOver > 0 ? 'font-medium text-rose-600' : 'text-slate-500'}`}>
             ФОТ команды: {fmtMoney(hqPayroll)} из бюджета {fmtMoney(PAYROLL_BUDGET)}/мес
             {hqPayrollOver > 0 && <> — перерасход +{hqPayrollOver}%</>}
+          </p>
+          <p className="mt-1 text-sm text-slate-700">
+            💹 Стоимость компании: <b>{fmtValue(pulse.total)}</b>
+            <span className="text-slate-400">
+              {' '}· команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
+              {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
+              {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
+            </span>
           </p>
         </section>
         <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-4">
