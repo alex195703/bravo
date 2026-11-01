@@ -849,3 +849,403 @@ export function buildReport(
 
 export { typeByRu, FUNCTIONS }
 export type { RelationKind }
+
+// ============================================================
+// ---------- ЖИВАЯ КОМПАНИЯ: сценарий «Компания как есть» ----------
+// ============================================================
+//
+// Отзыв игрока: «нет соревнования: при ограниченных ресурсах нельзя
+// удовлетворить все критерии, а пустые должности развязывают руки —
+// можно прокрастинировать». Отсюда месячный цикл управления:
+//
+//   • сеть принимается «как есть»: сильные, средние и слабые
+//     сотрудники, пустые кресла со стажем простоя, зарплаты;
+//   • каждый месяц приносит новую конъюнктуру: спрос покупателей
+//     и рынок труда; скамейка кандидатов обновляется и УХОДИТ;
+//   • решения: нанять (подъёмные = 1 оклад), заменить (плюс
+//     секверанс = 2 оклада), уволить или ничего не делать;
+//   • простой вакансии бьёт по кассе каждый месяц и по стоимости
+//     компании — прокрастинация стоит денег;
+//   • счёт — стоимость компании: сколько миллионов гривен сеть
+//     добавила (или потеряла) за 12 месяцев.
+
+/** Месяцев в сценарии */
+export const LIVE_MONTHS = 12
+/** Касса на старте, грн */
+export const LIVE_CASH_START = 2_500_000
+/** Увольнение: выплата в N окладов */
+export const SEVERANCE_MONTHS = 2
+/** Приём на работу: подъёмные в N окладов */
+export const SIGNING_BONUS_MONTHS = 1
+/** Операционные расходы сети (аренда, логистика, закупки), грн/мес */
+export const OPEX_BASE = 750_000
+/** Выручка сильной команды при ровном спросе, грн/мес */
+export const REVENUE_BASE = 2_600_000
+/** Простой вакансии: базовый штраф, грн/мес */
+export const VACANCY_FINE_BASE = 80_000
+/** Простой вакансии: прибавка за каждый месяц пустого кресла */
+export const VACANCY_FINE_STEP = 30_000
+/** Потолок месячного штрафа за одну вакансию */
+export const VACANCY_FINE_CAP = 300_000
+
+/** Конъюнктура спроса покупателей на месяц */
+export type DemandMode = 'boom' | 'steady' | 'slump'
+
+export const DEMAND_MODES: Record<DemandMode, {
+  label: string; emoji: string; revenueMult: number; opexMult: number; hint: string
+}> = {
+  boom: {
+    label: 'Ажиотажный спрос', emoji: '🔥', revenueMult: 1.35, opexMult: 1.1,
+    hint: 'Покупатели закупаются впрок — обороты выше обычного, но и закупки дороже',
+  },
+  steady: {
+    label: 'Ровный спрос', emoji: '🌤', revenueMult: 1.0, opexMult: 1.0,
+    hint: 'Обычная торговля без сюрпризов',
+  },
+  slump: {
+    label: 'Спад', emoji: '🌧', revenueMult: 0.65, opexMult: 0.9,
+    hint: 'У покупателей пусто в кошельках — выручка проседает',
+  },
+}
+
+/** Сколько кандидатов приходит на скамейку за один живой месяц */
+export const LIVE_BENCH_SIZE: Record<MarketMode, number> = { plenty: 5, normal: 4, drought: 3 }
+
+/** Кресло: сотрудник (тип, ru) или вакансия со стажем простоя */
+export interface SlotState { ru: string | null; vacantMonths: number }
+
+export interface MonthEvent { text: string; kind: 'good' | 'bad' | 'neutral' }
+
+/** Итоги закрытого месяца — для панели «итоги» и финальной истории */
+export interface MonthLog {
+  month: number
+  demand: DemandMode
+  revenue: number
+  opex: number
+  payroll: number
+  vacancyFine: number
+  /** изменение кассы за месяц (без кадровых ходов) */
+  net: number
+  /** стоимость компании на конец месяца */
+  value: number
+  /** изменение стоимости за месяц */
+  valueDelta: number
+  /** кто ушёл с рынка кадров */
+  left: string[]
+  events: MonthEvent[]
+}
+
+/** Полное состояние сценария «Компания как есть» */
+export interface LiveGame {
+  /** какой месяц играем: 1…12 */
+  month: number
+  /** касса, грн */
+  cash: number
+  /** конъюнктура рынка труда текущего месяца */
+  labor: MarketMode
+  /** конъюнктура спроса текущего месяца */
+  demand: DemandMode
+  /** должность → кресло */
+  slots: Record<string, SlotState>
+  /** все известные люди: сотрудники + скамейка месяца */
+  roster: Candidate[]
+  /** ru кандидатов на рынке этого месяца (в конце месяца уходят) */
+  bench: string[]
+  /** закрытые месяцы */
+  history: MonthLog[]
+  /** стоимость компании на момент приёмки */
+  startValue: number
+}
+
+/** Кабинет живой компании в общем формате (стоимость, ФОТ, сплочённость) */
+export function liveCabinet(game: LiveGame): Cabinet {
+  const cab: Cabinet = {}
+  for (const p of POSTS) cab[p.id] = game.slots[p.id]?.ru ?? null
+  return cab
+}
+
+/** Штраф за простой одной вакансии в месяце: растёт со стажем простоя */
+export function vacancyFineFor(vacantMonths: number): number {
+  return Math.min(VACANCY_FINE_CAP, VACANCY_FINE_BASE + VACANCY_FINE_STEP * Math.max(0, vacantMonths))
+}
+
+/** Суммарный штраф за простаивающие кресла, грн/мес */
+export function liveVacancyFine(game: LiveGame): number {
+  let sum = 0
+  for (const p of POSTS) {
+    const s = game.slots[p.id]
+    if (s && !s.ru) sum += vacancyFineFor(s.vacantMonths)
+  }
+  return sum
+}
+
+/**
+ * Сила команды: средний итог занятых × штраф за вакансии
+ * (0,88 в степени «число пустых кресел») × сплочённость.
+ */
+export function livePower(game: LiveGame): number {
+  let fitSum = 0
+  let filled = 0
+  let vacancies = 0
+  for (const p of POSTS) {
+    const s = game.slots[p.id]
+    if (!s || !s.ru) { vacancies++; continue }
+    const c = game.roster.find((x) => x.ru === s.ru)
+    if (c) { fitSum += overallFit(c, p); filled++ }
+  }
+  const avgFit = filled > 0 ? fitSum / filled : 0
+  const coh = cohesion(liveCabinet(game))
+  return (0.5 + 0.6 * (avgFit / 100)) * Math.pow(0.88, vacancies) * (0.92 + 0.16 * (coh / 100))
+}
+
+/** Ожидаемая выручка текущего месяца, грн */
+export function liveRevenue(game: LiveGame): number {
+  return round10k(REVENUE_BASE * DEMAND_MODES[game.demand].revenueMult * livePower(game))
+}
+
+/** Стоимость компании прямо сейчас (множитель — рынок труда месяца) */
+export function liveValue(game: LiveGame): CompanyValue {
+  return companyValue(liveCabinet(game), game.roster, game.labor)
+}
+
+function rollDemand(): DemandMode {
+  const r = Math.random()
+  return r < 0.3 ? 'boom' : r < 0.75 ? 'steady' : 'slump'
+}
+
+function rollLabor(): MarketMode {
+  const r = Math.random()
+  return r < 0.25 ? 'plenty' : r < 0.75 ? 'normal' : 'drought'
+}
+
+/** Скамейка месяца: кандидаты, которых нет в штате, и их немного */
+function newBench(game: LiveGame): Candidate[] {
+  const busy = POSTS.map((p) => game.slots[p.id]?.ru).filter((x): x is string => !!x)
+  const fresh = generateMarket(game.labor, busy)
+  return fresh.slice(0, LIVE_BENCH_SIZE[game.labor])
+}
+
+/**
+ * Принять сеть «как есть»: 2 сильных, 2 средних, 2 слабых сотрудника
+ * (слабых нередко ещё и переоплачивают), 2 вакансии со стажем простоя.
+ */
+export function newLiveGame(): LiveGame {
+  const names = new Set<string>()
+  const usedRu = new Set<string>()
+  const roster: Candidate[] = []
+  const slots: Record<string, SlotState> = {}
+  const order = shuffle([...POSTS])
+  const strength = ['strong', 'strong', 'ok', 'ok', 'weak', 'weak'] as const
+  order.forEach((post, i) => {
+    if (i >= strength.length) {
+      slots[post.id] = { ru: null, vacantMonths: 1 + Math.floor(Math.random() * 3) }
+      return
+    }
+    const level = strength[i]
+    const free = TYPES.filter((t) => !usedRu.has(t.ru))
+    const t = free[Math.floor(Math.random() * free.length)]
+    const c = makeCandidate(t, names)
+    names.add(c.name)
+    usedRu.add(t.ru)
+    if (level === 'strong') {
+      c.years = Math.max(c.years, 12)
+      c.education = Math.random() < 0.5 ? 'MBA' : 'Профильный вуз'
+    } else if (level === 'ok') {
+      c.years = 5 + Math.floor(Math.random() * 8)
+      if (c.education === 'MBA') c.education = 'Профильный вуз'
+    } else {
+      c.years = 1 + Math.floor(Math.random() * 4)
+      // Классика принимаемой компании: человек из чужой сферы
+      if (Math.random() < 0.5) {
+        const others = POSTS.filter((p) => p.id !== post.id)
+        c.profession = others[Math.floor(Math.random() * others.length)].id
+      }
+    }
+    c.achievement = ACHIEVEMENTS[c.profession][Math.floor(Math.random() * ACHIEVEMENTS[c.profession].length)]
+    let salary = salaryFor(profFit(c, post), c.years, c.profession)
+    // Переоплаченный слабый сотрудник — решение о замене неочевидно
+    if (level === 'weak' && Math.random() < 0.5) salary = Math.round((salary * 1.25) / 1000) * 1000
+    c.salary = salary
+    roster.push(c)
+    slots[post.id] = { ru: c.ru, vacantMonths: 0 }
+  })
+  const game: LiveGame = {
+    month: 1,
+    cash: LIVE_CASH_START,
+    labor: 'normal',
+    demand: 'steady',
+    slots,
+    roster,
+    bench: [],
+    history: [],
+    startValue: 0,
+  }
+  const benchCandidates = newBench(game)
+  game.roster = [...roster, ...benchCandidates]
+  game.bench = benchCandidates.map((c) => c.ru)
+  game.startValue = liveValue(game).total
+  return game
+}
+
+/** Предварительный расчёт стоимости кадрового хода (кнопка «Предложить работу») */
+export interface HireCost {
+  /** подъёмные новому, грн */
+  bonus: number
+  /** секверанс уходящему, грн (0 — кресло было пустым) */
+  severance: number
+  /** всего из кассы, грн */
+  total: number
+  /** кресло занято — это замена */
+  replacing: boolean
+  /** денег хватает, ход возможен */
+  ok: boolean
+  /** почему ход невозможен */
+  reason: string
+}
+
+export function hireCost(game: LiveGame, ru: string, postId: string): HireCost {
+  const cand = game.roster.find((c) => c.ru === ru)
+  const slot = game.slots[postId]
+  const old = slot?.ru ? game.roster.find((c) => c.ru === slot.ru) : null
+  const bonus = cand ? cand.salary * SIGNING_BONUS_MONTHS : 0
+  const severance = old ? old.salary * SEVERANCE_MONTHS : 0
+  const total = bonus + severance
+  let ok = false
+  let reason = ''
+  if (!cand) reason = 'Кандидата уже нет на рынке'
+  else if (game.cash < total) {
+    reason = `В кассе ${fmtMoney(game.cash)} — не хватает на кадровые выплаты ${fmtMoney(total)}`
+  } else ok = true
+  return { bonus, severance, total, replacing: !!old, ok, reason }
+}
+
+export interface LiveActionResult { game: LiveGame; event: MonthEvent }
+
+/** Нанять кандидата (ru) на должность: в вакансию или на замену */
+export function hireCandidate(game: LiveGame, ru: string, postId: string): LiveActionResult {
+  const cost = hireCost(game, ru, postId)
+  const cand = game.roster.find((c) => c.ru === ru)
+  if (!cand || !cost.ok) {
+    return { game, event: { text: 'Ход не состоялся: не хватает денег или кандидата', kind: 'bad' } }
+  }
+  const post = POSTS.find((p) => p.id === postId)!
+  const oldRu = game.slots[postId]?.ru ?? null
+  const old = oldRu ? game.roster.find((c) => c.ru === oldRu) : null
+  const roster = game.roster.filter((c) => c.ru !== oldRu)
+  // Кандидат больше не на рынке — он сотрудник: убираем со скамейки
+  const bench = game.bench.filter((x) => x !== ru)
+  const slots = { ...game.slots, [postId]: { ru, vacantMonths: 0 } }
+  const next: LiveGame = { ...game, cash: game.cash - cost.total, slots, roster, bench }
+  const text = cost.replacing && old
+    ? `«${post.title}»: ${old.name} уходит (секверанс ${fmtMoney(cost.severance)}), кресло принимает ${cand.name} (${cand.ru}) — подъёмные ${fmtMoney(cost.bonus)}`
+    : `«${post.title}»: кресло принимает ${cand.name} (${cand.ru}, ${fmtMoney(cand.salary)}/мес) — подъёмные ${fmtMoney(cost.bonus)}`
+  return { game: next, event: { text, kind: cost.replacing ? 'neutral' : 'good' } }
+}
+
+/** Уволить сотрудника с должности: секверанс, кресло становится вакансией */
+export function fireEmployee(game: LiveGame, postId: string): LiveActionResult {
+  const slot = game.slots[postId]
+  const old = slot?.ru ? game.roster.find((c) => c.ru === slot.ru) : null
+  if (!old || !slot) {
+    return { game, event: { text: 'Увольнять некого — кресло и так пустое', kind: 'neutral' } }
+  }
+  const severance = old.salary * SEVERANCE_MONTHS
+  const post = POSTS.find((p) => p.id === postId)!
+  const next: LiveGame = {
+    ...game,
+    cash: game.cash - severance,
+    slots: { ...game.slots, [postId]: { ru: null, vacantMonths: 0 } },
+    roster: game.roster.filter((c) => c.ru !== old.ru),
+  }
+  return {
+    game: next,
+    event: {
+      text: `«${post.title}»: ${old.name} покидает компанию — выплачено ${fmtMoney(severance)} (${SEVERANCE_MONTHS} оклада). Кресло пусто — простой начался`,
+      kind: 'bad',
+    },
+  }
+}
+
+/** Закрыть месяц: обороты, простой, стоимость — и время идёт дальше */
+export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean } {
+  const cab = liveCabinet(game)
+  const pay = payroll(cab, game.roster)
+  const revenue = liveRevenue(game)
+  const opex = round10k(OPEX_BASE * DEMAND_MODES[game.demand].opexMult)
+  const fine = liveVacancyFine(game)
+  const net = revenue - pay - opex - fine
+  let cash = game.cash + net
+
+  const events: MonthEvent[] = []
+  if (net >= 0) events.push({ text: `Касса пополнилась на ${fmtMoney(net)}`, kind: 'good' })
+  else events.push({ text: `Месяц закрыт с дефицитом ${fmtMoney(-net)}`, kind: 'bad' })
+  if (cash < 0) {
+    cash = 0
+    events.push({ text: 'Денег не хватило — поставщикам пообещали заплатить из будущей выручки', kind: 'bad' })
+  }
+  if (fine > 0) {
+    const vacs = POSTS.filter((p) => !game.slots[p.id]?.ru).length
+    events.push({
+      text: `Простой ${vacs === 1 ? 'вакансии' : `${vacs} вакансий`} съел ${fmtMoney(fine)}`,
+      kind: 'bad',
+    })
+  }
+  if (pay > PAYROLL_BUDGET) {
+    events.push({ text: `ФОТ выше бюджета: перерасход ${fmtMoney(pay - PAYROLL_BUDGET)}/мес бьёт по стоимости`, kind: 'bad' })
+  }
+
+  const prevValue = game.history.length > 0
+    ? game.history[game.history.length - 1].value
+    : game.startValue
+  const value = liveValue(game).total
+  const valueDelta = value - prevValue
+  events.push({
+    text: `Стоимость компании ${valueDelta >= 0 ? 'выросла' : 'просела'} на ${fmtMoney(Math.abs(valueDelta))}`,
+    kind: valueDelta >= 0 ? 'good' : 'bad',
+  })
+
+  const left = game.bench
+    .map((ru) => game.roster.find((c) => c.ru === ru))
+    .filter((c): c is Candidate => !!c)
+    .map((c) => `${c.name} (${c.ru})`)
+  if (left.length > 0) events.push({ text: `С рынка ушли: ${left.join(', ')}`, kind: 'neutral' })
+
+  const log: MonthLog = {
+    month: game.month, demand: game.demand, revenue, opex,
+    payroll: pay, vacancyFine: fine, net, value, valueDelta, left, events,
+  }
+  const history = [...game.history, log]
+  const month = game.month + 1
+  const finished = month > LIVE_MONTHS
+
+  // Кресла простаивают дальше, ушедшие кандидаты исчезают навсегда
+  const slots: Record<string, SlotState> = {}
+  for (const p of POSTS) {
+    const s = game.slots[p.id]
+    slots[p.id] = s && !s.ru
+      ? { ru: null, vacantMonths: s.vacantMonths + 1 }
+      : { ru: s?.ru ?? null, vacantMonths: 0 }
+  }
+  const benchRus = new Set(game.bench)
+  // Сотрудники определяются по креслам — самый надёжный источник истины
+  const employeeRus = new Set(
+    POSTS.map((p) => slots[p.id]?.ru).filter((x): x is string => !!x),
+  )
+  const employeesOnly = game.roster.filter((c) => employeeRus.has(c.ru) && !benchRus.has(c.ru))
+  const labor: MarketMode = finished ? game.labor : rollLabor()
+  const demand: DemandMode = finished ? game.demand : rollDemand()
+  const interim: LiveGame = { ...game, month, cash, labor, demand, slots, roster: employeesOnly, bench: [], history }
+  const fresh = finished ? [] : newBench(interim)
+  const next: LiveGame = { ...interim, roster: [...employeesOnly, ...fresh], bench: fresh.map((c) => c.ru) }
+  return { game: next, finished }
+}
+
+/** Оценка года по приросту стоимости, грн */
+export function liveGrade(growth: number): { word: string; note: string } {
+  if (growth >= 12_000_000) return { word: 'Блестящее управление', note: 'сеть выросла заметно сильнее рынка' }
+  if (growth >= 6_000_000) return { word: 'Сильный год', note: 'решения были в основном верными' }
+  if (growth >= 2_000_000) return { word: 'Крепкий хозяйственник', note: 'рост есть, но запас был больше' }
+  if (growth >= 0) return { word: 'Год без роста', note: 'стоимость удержали, но не продвинули' }
+  if (growth >= -3_000_000) return { word: 'Стоимость просела', note: 'простой и дорогой штат съели результат' }
+  return { word: 'Сеть обесценилась', note: 'такое лучше не повторять: считайте год учебным' }
+}
