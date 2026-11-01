@@ -25,6 +25,7 @@ import {
   SEVERANCE_MONTHS, SIGNING_BONUS_MONTHS,
   newLiveGame, liveValue, liveRevenue, liveVacancyFine, liveCabinet,
   hireCost, hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
+  teamVsIdeal,
   type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
   type MarketMode, type Candidate, type HireCost,
 } from '@/lib/bravo'
@@ -33,6 +34,15 @@ type Phase = 'intro' | 'manage' | 'final'
 
 const GAME_KEY = 'bravo-live-game'
 const BEST_KEY = 'bravo-live-best'
+const SPEED_KEY = 'bravo-live-speed'
+
+/** Скорости автопилота: пауза и три темпа закрытия месяцев */
+const SPEEDS = [
+  { ms: 0, label: '⏸', title: 'Пауза: думаем без спешки' },
+  { ms: 8000, label: '🐢', title: 'Медленно: месяц каждые 8 секунд' },
+  { ms: 4000, label: '▶', title: 'Средне: месяц каждые 4 секунды' },
+  { ms: 1500, label: '⏩', title: 'Быстро: месяц каждые 1,5 секунды' },
+] as const
 
 interface SavedBest { value: number; growth: number }
 
@@ -100,6 +110,7 @@ export default function BravoSimulator() {
   const [best, setBest] = useState<SavedBest | null>(null)
   const [isNewBest, setIsNewBest] = useState(false)
   const [intl, setIntl] = useState(false)
+  const [speed, setSpeed] = useState(0)
   const hydrated = useRef(false)
 
   // Читаем сохранённую партию после монтирования (иначе гидратация расходится)
@@ -116,6 +127,8 @@ export default function BravoSimulator() {
         }
         const rawBest = localStorage.getItem(BEST_KEY)
         if (rawBest) setBest(JSON.parse(rawBest) as SavedBest)
+        const rawSpeed = localStorage.getItem(SPEED_KEY)
+        if (rawSpeed && SPEEDS.some((s) => s.ms === Number(rawSpeed))) setSpeed(Number(rawSpeed))
       } catch { /* приватный режим — играем без сохранений */ }
       hydrated.current = true
     })
@@ -129,12 +142,27 @@ export default function BravoSimulator() {
     } catch { /* приватный режим */ }
   }, [game])
 
+  // Скорость автопилота запоминается между партиями
+  useEffect(() => {
+    if (!hydrated.current) return
+    try {
+      localStorage.setItem(SPEED_KEY, String(speed))
+    } catch { /* приватный режим */ }
+  }, [speed])
+
   const pulse = useMemo(() => (game ? liveValue(game) : null), [game])
   const cab = useMemo(() => (game ? liveCabinet(game) : null), [game])
   const pay = cab && game ? payroll(cab, game.roster) : 0
   const rev = game ? liveRevenue(game) : 0
   const fine = game ? liveVacancyFine(game) : 0
   const coh = cab ? cohesion(cab) : 0
+  // Штат против эталона и суперуправленец на скамейке (для панелей ниже)
+  const idealInfo = cab && game ? teamVsIdeal(cab, game.roster) : null
+  const benchStar = game && cab
+    ? game.bench
+      .map((ru) => game.roster.find((c) => c.ru === ru))
+      .find((c) => c?.super) ?? null
+    : null
 
   function acceptCompany(): void {
     setGame(newLiveGame())
@@ -160,7 +188,7 @@ export default function BravoSimulator() {
   }
 
   function doClose(): void {
-    if (!game) return
+    if (!game || game.month > LIVE_MONTHS) return
     const res = closeMonth(game)
     setGame(res.game)
     setNote(null)
@@ -179,6 +207,18 @@ export default function BravoSimulator() {
       setPhase('final')
     }
   }
+
+  // Автопилот: месяцы закрываются сами с выбранной скоростью.
+  // doClose живёт в ref — интервал всегда зовёт свежую версию.
+  const doCloseRef = useRef(doClose)
+  useEffect(() => {
+    doCloseRef.current = doClose
+  })
+  useEffect(() => {
+    if (phase !== 'manage' || speed === 0 || (game && game.month > LIVE_MONTHS)) return
+    const id = window.setInterval(() => doCloseRef.current(), speed)
+    return () => window.clearInterval(id)
+  }, [phase, speed, game?.month])
 
   const intlBtn = (
     <button
@@ -207,6 +247,14 @@ export default function BravoSimulator() {
       {
         emoji: '💰', title: 'Счёт — стоимость компании',
         text: 'Каждое решение видно в гривнах сразу: слабый руководитель, ссоры в команде и простой бьют по цене сети. Рекорд — рост за год.',
+      },
+      {
+        emoji: '🦸', title: 'Эталон: суперуправленец',
+        text: 'У каждой должности есть эталон — сильнейший тип, 20 лет в профессии и MBA (панель «🎯 Эталон»). Иногда на рынок выходит живой эталон — суперуправленец: стоит в 1,45 раза дороже рынка, но тянет команду к мечте.',
+      },
+      {
+        emoji: '⏱', title: 'Скорость моделирования',
+        text: 'Не ждите месяц за месяцем по кнопке: включите автопилот 🐢/▶/⏩ — месяцы закроются сами. Пауза — чтобы думать; выбор кандидата ставит автопилот на паузу.',
       },
     ]
     return (
@@ -249,11 +297,14 @@ export default function BravoSimulator() {
           <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-6">
             <h2 className="font-semibold text-slate-800 mb-2">Правила за 30 секунд</h2>
             <ul className="text-sm text-slate-600 space-y-1.5">
-              <li>📅 <b>{LIVE_MONTHS} месяцев</b> — месяц закрывается кнопкой «Закрыть месяц», время уже не остановить.</li>
+              <li>📅 <b>{LIVE_MONTHS} месяцев</b> — месяц закрывается кнопкой «Закрыть месяц» или автопилотом на выбранной скорости.</li>
               <li>🧑‍💼 Кандидаты приходят на рынок труда и <b>уходят в конце месяца</b> — решение нельзя откладывать навсегда.</li>
               <li>💼 Приём на работу стоит <b>подъёмных ({SIGNING_BONUS_MONTHS} оклад)</b>, увольнение — <b>секверанса ({SEVERANCE_MONTHS} оклада)</b>; всё платится из кассы.</li>
               <li>🕳 Пустое кресло <b>капает каждый месяц</b>: штраф кассе растёт со временем простоя, а стоимость компании теряет {fmtValue(VACANCY_VALUE_PENALTY)} за каждую вакансию.</li>
               <li>🌤 Конъюнктура гуляет: спрос покупателей и рынок труда меняются каждый месяц — выручка то растёт, то проседает.</li>
+              <li>🎯 У каждой должности есть эталон — сравнивайте штат с идеалом в панели «Эталон».</li>
+              <li>🦸 Раз в несколько месяцев на рынок может выйти суперуправленец — эталон во плоти, но в 1,45 раза дороже рынка.</li>
+              <li>⏱ Автопилот закрывает месяцы сам: год проматывается за полминуты, пауза — чтобы думать.</li>
               <li>🏆 Финал: сколько миллионов гривен вы добавили к стоимости сети — это ваш счёт и рекорд.</li>
             </ul>
           </section>
@@ -286,6 +337,11 @@ export default function BravoSimulator() {
     const finalValue = finalLog.value
     const growth = finalValue - game.startValue
     const grade = liveGrade(growth)
+    const idealFinal = cab ? teamVsIdeal(cab, game.roster) : null
+    const starsHired = POSTS.filter((p) => {
+      const ru = game.slots[p.id]?.ru
+      return ru ? game.roster.find((c) => c.ru === ru)?.super : false
+    }).length
     const values = game.history.map((h) => h.value)
     const minV = Math.min(...values, game.startValue)
     const maxV = Math.max(...values, game.startValue)
@@ -437,6 +493,15 @@ export default function BravoSimulator() {
             </div>
           </section>
 
+          {idealFinal && (
+            <p className="text-center text-sm text-slate-500 mb-6">
+              🎯 Команда к эталону: <b className="text-slate-700">{idealFinal.avgPct}%</b>
+              {starsHired > 0 && (
+                <> · 🦸 суперуправленцев в штате: <b className="text-slate-700">{starsHired}</b></>
+              )}
+            </p>
+          )}
+
           <div className="flex flex-wrap gap-3 justify-center pb-2">
             <button
               onClick={() => setPhase('manage')}
@@ -540,6 +605,65 @@ export default function BravoSimulator() {
           </div>
         </section>
 
+        {/* Эталон: команда мечты — сравнение штата с идеалом */}
+        {idealInfo && (
+          <details className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-4">
+            <summary className="cursor-pointer select-none font-semibold text-slate-800">
+              🎯 Эталон: команда мечты — ваш штат{' '}
+              <b className={idealInfo.avgPct >= 75 ? 'text-emerald-700' : idealInfo.avgPct >= 50 ? 'text-amber-600' : 'text-rose-600'}>
+                {idealInfo.avgPct}%
+              </b>{' '}от идеала
+              <span className="ml-2 text-xs font-normal text-slate-400">нажмите, чтобы развернуть</span>
+            </summary>
+            <p className="mt-2 text-sm text-slate-500">
+              Эталон должности — сильнейший соционический тип, 20 лет в своей сфере и MBA.
+              Раз в несколько месяцев на рынок может выйти «живой эталон» — 🦸 суперуправленец:
+              берёт в 1,45 раза дороже рынка, но тянет штат к мечте.
+            </p>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 border-b border-slate-200">
+                    <th className="py-2 pr-3 font-medium">Должность</th>
+                    <th className="py-2 pr-3 font-medium">Эталон</th>
+                    <th className="py-2 pr-3 font-medium">Эталон стоит</th>
+                    <th className="py-2 pr-3 font-medium">У вас сейчас</th>
+                    <th className="py-2 font-medium">% от эталона</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {idealInfo.rows.map((row) => {
+                    const s = game.slots[row.post.id]
+                    const ru = s?.ru ?? null
+                    const emp = ru ? game.roster.find((c) => c.ru === ru) ?? null : null
+                    return (
+                      <tr key={row.post.id} className="border-b border-slate-100 last:border-0">
+                        <td className="py-2 pr-3 text-slate-700">{row.post.emoji} {row.post.title}</td>
+                        <td className="py-2 pr-3 text-slate-600">
+                          {row.idealType} · {fitStars(row.idealFit)} {row.idealFit}%
+                        </td>
+                        <td className="py-2 pr-3 text-slate-600">{fmtMoney(row.idealSalary)}/мес</td>
+                        <td className="py-2 pr-3 text-slate-600">
+                          {emp ? `${fitStars(row.curFit)} ${row.curFit}%` : '— вакансия —'}
+                        </td>
+                        <td className="py-2">
+                          <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${fitBadgeClass(row.pct)}`}>
+                            {row.pct}%
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-sm text-slate-500">
+              ФОТ мечты: <b>{fmtMoney(idealInfo.idealPayroll)}/мес</b> (у вас сейчас {fmtMoney(pay)}) —
+              даже к идеалу приходится идти с оглядкой на бюджет.
+            </p>
+          </details>
+        )}
+
         {/* Последнее кадровое решение */}
         {note && (
           <div
@@ -598,6 +722,11 @@ export default function BravoSimulator() {
                   <span className={`rounded-md px-2 py-0.5 text-xs border ${quadraChip(t.quadra)}`}>
                     {label(t, intl)}
                   </span>
+                  {emp.super && (
+                    <span className="rounded-md bg-amber-400 px-2 py-0.5 text-xs font-bold text-amber-900">
+                      🦸 эталон
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-slate-500">{emp.tagline}</p>
                 <p className="text-sm text-slate-600 mt-2">
@@ -627,6 +756,18 @@ export default function BravoSimulator() {
           })}
         </div>
 
+        {/* Экстренная новость: на рынке суперуправленец */}
+        {benchStar && (
+          <div className="rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 mb-4" role="status">
+            <p className="font-semibold text-amber-800">
+              🦸 Эталон на рынке: {benchStar.name} ({benchStar.ru}) претендует на «{POSTS.find((p) => p.id === benchStar.profession)?.title}»
+            </p>
+            <p className="mt-1 text-sm text-amber-700">
+              Просит {fmtMoney(benchStar.salary)}/мес — в 1,45 раза выше рынка. Кандидаты уходят в конце месяца: суперуправленцы не ждут.
+            </p>
+          </div>
+        )}
+
         {/* Рынок труда месяца */}
         <h2 className="font-semibold text-slate-800 mb-1 px-1">🧑‍💼 Рынок труда ({game.bench.length})</h2>
         <p className="text-sm text-slate-500 mb-3 px-1">
@@ -643,15 +784,24 @@ export default function BravoSimulator() {
             const plan: HireCost | null = selPost ? hireCost(game, c.ru, selPost.id) : null
             const fit = selPost ? overallFit(c, selPost) : 0
             return (
-              <article key={ru} className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 flex flex-col">
+              <article key={ru} className={`rounded-2xl p-4 shadow-sm flex flex-col ${c.super ? 'bg-amber-50 border-2 border-amber-400' : 'bg-white border border-slate-200'}`}>
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="font-semibold text-slate-800">{c.name}</p>
                   <span className={`rounded-md px-2 py-0.5 text-xs border ${quadraChip(t.quadra)}`}>
                     {label(t, intl)}
                   </span>
+                  {c.super && (
+                    <span className="rounded-md bg-amber-400 px-2 py-0.5 text-xs font-bold text-amber-900">🦸 ЭТАЛОН</span>
+                  )}
                   <span className="text-xs text-slate-400">{c.age} лет</span>
                 </div>
                 <p className="text-xs text-slate-500">{c.tagline}</p>
+                {c.super && (
+                  <p className="mt-1 text-xs font-medium text-amber-700">
+                    Суперуправленец: резюме уровня эталона для «{POSTS.find((p) => p.id === c.profession)?.title}».
+                    Дорого, но такое бывает раз в год
+                  </p>
+                )}
                 <p className="text-sm font-medium text-slate-700 mt-2">
                   {field} · стаж {c.years} лет
                 </p>
@@ -665,6 +815,8 @@ export default function BravoSimulator() {
                   value={sel && sel.ru === c.ru ? sel.postId : ''}
                   onChange={(e) => {
                     const postId = e.target.value
+                    // Начали решать — автопилот встаёт на паузу
+                    if (postId && speed !== 0) setSpeed(0)
                     setSel(postId ? { ru: c.ru, postId } : null)
                   }}
                   className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-400"
@@ -753,16 +905,42 @@ export default function BravoSimulator() {
           </section>
         )}
 
-        {/* Действие месяца */}
+        {/* Действие месяца: вручную или автопилотом */}
         <div className="flex flex-wrap items-center gap-3 pb-2">
           <button
-            onClick={doClose}
+            onClick={() => (game.month > LIVE_MONTHS ? setPhase('final') : doClose())}
             className="rounded-xl bg-slate-800 px-5 py-2.5 font-semibold text-white shadow hover:bg-slate-700"
           >
-            {game.month >= LIVE_MONTHS ? '🏁 Закрыть год и сдать отчёт' : `▶ Закрыть месяц ${game.month} →`}
+            {game.month > LIVE_MONTHS
+              ? '🏁 Открыть отчёт владельцу'
+              : game.month >= LIVE_MONTHS
+                ? '🏁 Закрыть год и сдать отчёт'
+                : `▶ Закрыть месяц ${game.month} →`}
           </button>
+          <div
+            className="flex items-center gap-1 rounded-xl border border-slate-300 bg-white p-1"
+            role="group"
+            aria-label="Скорость моделирования: автопилот месяцев"
+          >
+            <span className="px-1.5 text-xs text-slate-400">⏱ Автопилот</span>
+            {SPEEDS.map((s) => (
+              <button
+                key={s.ms}
+                onClick={() => setSpeed(s.ms)}
+                title={s.title}
+                aria-pressed={speed === s.ms}
+                className={`rounded-lg px-2.5 py-1.5 text-sm ${
+                  speed === s.ms ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <span aria-hidden>{s.label}</span>
+              </button>
+            ))}
+          </div>
           <span className="text-sm text-slate-500">
-            не наняли — кандидаты уйдут · вакансии подорожают
+            {speed === 0
+              ? 'не наняли — кандидаты уйдут · вакансии подорожают'
+              : `месяц закроется сам через ${(speed / 1000).toString().replace('.', ',')} с · пауза — чтобы думать`}
           </span>
         </div>
       </main>
