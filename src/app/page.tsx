@@ -25,14 +25,15 @@ import {
   SEVERANCE_MONTHS, SIGNING_BONUS_MONTHS,
   newLiveGame, liveValue, liveRevenue, liveVacancyFine, liveCabinet,
   hireCost, hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
-  teamVsIdeal,
+  teamVsIdeal, idealCompare,
   type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
   type MarketMode, type Candidate, type HireCost,
+  type IdealState, type SlotState, type IdealCompare, type IdealLinePoint,
 } from '@/lib/bravo'
 
 type Phase = 'intro' | 'manage' | 'final'
 
-const GAME_KEY = 'bravo-live-game'
+const GAME_KEY = 'bravo-live-game-v2'
 const BEST_KEY = 'bravo-live-best'
 const SPEED_KEY = 'bravo-live-speed'
 
@@ -56,9 +57,60 @@ function fitBadgeClass(fit: number): string {
   return fit >= 75 ? FIT_BADGE.high : fit >= 55 ? FIT_BADGE.mid : FIT_BADGE.low
 }
 
+const IDEAL_CHIP: Record<string, string> = {
+  ahead: 'bg-amber-100 text-amber-800 border-amber-400',
+  close: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+  mid: 'bg-amber-50 text-amber-700 border-amber-300',
+  far: 'bg-rose-100 text-rose-700 border-rose-300',
+}
+
+function idealChipClass(pct: number): string {
+  return pct >= 100 ? IDEAL_CHIP.ahead : pct >= 90 ? IDEAL_CHIP.close : pct >= 70 ? IDEAL_CHIP.mid : IDEAL_CHIP.far
+}
+
+/** Вердикт финала: чем игрок закончил против линии идеала */
+function idealVerdict(pct: number, gap: number): string {
+  if (pct >= 100) return `🏅 Вы обогнали линию идеала на ${fmtValue(-gap)}: случайности мира были на вашей стороне. Такое удаётся немногим.`
+  if (pct >= 90) return `Вы почти догнали идеал: отставание всего ${fmtValue(gap)}. Ещё пара верных решений — и линия ваша.`
+  if (pct >= 75) return `Крепкая игра, но идеал в тех же условиях управил на ${fmtValue(gap)} лучше — посмотрите, где линии разошлись.`
+  return `Идеал в тех же условиях успел на ${fmtValue(gap)} больше. Сравните линии по месяцам: там, где они разошлись, и сидят ваши деньги.`
+}
+
 /** «+2,6 млн грн» / «−1,2 млн грн» — деньги со знаком */
 function signedMoney(n: number): string {
   return n >= 0 ? `+${fmtValue(n)}` : `−${fmtValue(Math.abs(n))}`
+}
+
+/** Восстановление теневой компании из сохранения: без неё партия не принимается */
+function restoreIdeal(parsed: Partial<LiveGame>): IdealState | null {
+  const i = parsed.ideal as Partial<IdealState> | undefined
+  if (!i || typeof i !== 'object') return null
+  const cash = Number(i.cash)
+  if (!Number.isFinite(cash) || cash < 0) return null
+  if (!i.slots || typeof i.slots !== 'object') return null
+  const rawSlots = i.slots as Record<string, { ru?: unknown; vacantMonths?: unknown }>
+  const slots: Record<string, SlotState> = {}
+  for (const p of POSTS) {
+    const s = rawSlots[p.id]
+    if (!s) return null
+    const ru = typeof s.ru === 'string' && TYPES.some((t) => t.ru === s.ru) ? s.ru : null
+    const vacantMonths = Number.isFinite(Number(s.vacantMonths))
+      ? Math.max(0, Math.floor(Number(s.vacantMonths)))
+      : 0
+    slots[p.id] = { ru, vacantMonths }
+  }
+  const roster = Array.isArray(i.roster)
+    ? i.roster
+      .filter((c) => c && typeof c.ru === 'string' && TYPES.some((t) => t.ru === c.ru))
+      .map(normalizeCandidate)
+    : []
+  const history = Array.isArray(i.history)
+    ? i.history
+      .filter((h) => h && Number.isFinite(Number(h.value)) && Number(h.month) >= 1)
+      .map((h) => ({ month: Number(h.month), value: Number(h.value) }))
+    : []
+  const moves = Array.isArray(i.moves) ? i.moves.filter((m): m is string => typeof m === 'string') : []
+  return { cash, slots, roster, history, moves }
 }
 
 /** Восстановление партии из сохранения: битые данные отбрасываем */
@@ -96,7 +148,9 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
       : []
     const history = Array.isArray(parsed.history) ? parsed.history : []
     const startValue = Number(parsed.startValue) > 0 ? Number(parsed.startValue) : 0
-    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue }
+    const ideal = restoreIdeal(parsed)
+    if (!ideal) return null
+    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal }
   } catch {
     return null
   }
@@ -158,6 +212,8 @@ export default function BravoSimulator() {
   const coh = cab ? cohesion(cab) : 0
   // Штат против эталона и суперуправленец на скамейке (для панелей ниже)
   const idealInfo = cab && game ? teamVsIdeal(cab, game.roster) : null
+  // Линия идеального управления: теневой управляющий против игрока
+  const cmp = useMemo(() => (game ? idealCompare(game) : null), [game])
   const benchStar = game && cab
     ? game.bench
       .map((ru) => game.roster.find((c) => c.ru === ru))
@@ -253,6 +309,10 @@ export default function BravoSimulator() {
         text: 'У каждой должности есть эталон — сильнейший тип, 20 лет в профессии и MBA (панель «🎯 Эталон»). Иногда на рынок выходит живой эталон — суперуправленец: стоит в 1,45 раза дороже рынка, но тянет команду к мечте.',
       },
       {
+        emoji: '🥇', title: 'Линия идеального управления',
+        text: 'Рядом с вами играет теневой суперуправленец: принял ту же сеть и живёт в тех же условиях, но ходит без ошибок. Его линия на графике — ваша цель; догоните её, а если повезёт — обгоните!',
+      },
+      {
         emoji: '⏱', title: 'Скорость моделирования',
         text: 'Не ждите месяц за месяцем по кнопке: включите автопилот 🐢/▶/⏩ — месяцы закроются сами. Пауза — чтобы думать; выбор кандидата ставит автопилот на паузу.',
       },
@@ -303,6 +363,7 @@ export default function BravoSimulator() {
               <li>🕳 Пустое кресло <b>капает каждый месяц</b>: штраф кассе растёт со временем простоя, а стоимость компании теряет {fmtValue(VACANCY_VALUE_PENALTY)} за каждую вакансию.</li>
               <li>🌤 Конъюнктура гуляет: спрос покупателей и рынок труда меняются каждый месяц — выручка то растёт, то проседает.</li>
               <li>🎯 У каждой должности есть эталон — сравнивайте штат с идеалом в панели «Эталон».</li>
+              <li>🥇 Линия идеального управления: теневой управляющий играет те же условия без ошибок — его линия растёт на графике рядом с вашей.</li>
               <li>🦸 Раз в несколько месяцев на рынок может выйти суперуправленец — эталон во плоти, но в 1,45 раза дороже рынка.</li>
               <li>⏱ Автопилот закрывает месяцы сам: год проматывается за полминуты, пауза — чтобы думать.</li>
               <li>🏆 Финал: сколько миллионов гривен вы добавили к стоимости сети — это ваш счёт и рекорд.</li>
@@ -343,6 +404,7 @@ export default function BravoSimulator() {
       return ru ? game.roster.find((c) => c.ru === ru)?.super : false
     }).length
     const values = game.history.map((h) => h.value)
+    const finalCmp = idealCompare(game)
     const minV = Math.min(...values, game.startValue)
     const maxV = Math.max(...values, game.startValue)
     const totalRevenue = game.history.reduce((a, h) => a + h.revenue, 0)
@@ -370,6 +432,11 @@ export default function BravoSimulator() {
             <p className="mt-1 text-slate-500">
               <b className="text-slate-700">{grade.word}</b> — {grade.note}
             </p>
+            {finalCmp && (
+              <p className="mt-1 text-slate-500">
+                🥇 от линии идеального управления: <b className={finalCmp.pct >= 100 ? 'text-amber-700' : 'text-slate-700'}>{finalCmp.pct}%</b>
+              </p>
+            )}
             {best && (
               <p className="mt-2 text-sm text-slate-400">
                 Рекорд сценария: {fmtValue(best.value)} ({best.growth >= 0 ? '+' : '−'}{fmtValue(Math.abs(best.growth))})
@@ -382,7 +449,7 @@ export default function BravoSimulator() {
             <p className="text-xs text-slate-400 mb-3">
               столбики выше линии старта — компания дорожает, ниже — дешевеет
             </p>
-            <div className="flex items-end gap-1.5 h-28">
+            <div className="flex gap-1.5 h-28">
               {game.history.map((h, i) => {
                 const span = maxV - minV || 1
                 const pct = 15 + 85 * ((h.value - minV) / span)
@@ -404,6 +471,27 @@ export default function BravoSimulator() {
               ))}
             </div>
           </section>
+
+          {/* Линия идеального управления: итоговая дуэль с теневым управляющим */}
+          {finalCmp && (
+            <section aria-label="Линия идеального управления" className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-semibold text-slate-800">🥇 Линия идеального управления: вы против суперуправленца</h2>
+                <span className={`rounded-lg border px-3 py-1 text-sm font-bold ${idealChipClass(finalCmp.pct)}`}>
+                  {finalCmp.pct >= 100 ? `🏅 ${finalCmp.pct}% — выше идеала` : `${finalCmp.pct}% от идеала`}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1 mb-1">
+                теневой управляющий принял ту же сеть и прожил те же 12 месяцев условий — но только с верными ходами
+              </p>
+              <IdealLineChart line={finalCmp.line} height={190} />
+              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
+                <span><b className="text-emerald-700">— вы</b> · <b className="text-amber-700">- - идеал</b> · серый пунктир — цена при приёмке</span>
+                <span>{finalCmp.pct >= 100 ? `преимущество ${fmtValue(-finalCmp.gap)}` : `отставание ${fmtValue(finalCmp.gap)}`}</span>
+              </div>
+              <p className="mt-2 text-sm text-slate-600">{idealVerdict(finalCmp.pct, finalCmp.gap)}</p>
+            </section>
+          )}
 
           <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
             <h2 className="font-semibold text-slate-800 mb-3">Куда утекали деньги за год</h2>
@@ -604,6 +692,39 @@ export default function BravoSimulator() {
             </div>
           </div>
         </section>
+
+        {/* Линия идеального управления: теневой управляющий против игрока */}
+        {cmp && (
+          <section aria-label="Линия идеального управления" className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">🥇 Линия идеального управления</p>
+                <p className="mt-0.5 font-semibold text-slate-800">
+                  Вы: <b className="text-emerald-700">{fmtValue(cmp.playerValue)}</b>
+                  <span className="text-slate-300 mx-1.5">·</span>
+                  Идеал: <b className="text-amber-700">{fmtValue(cmp.idealValue)}</b>
+                </p>
+              </div>
+              <span className={`rounded-lg border px-3 py-1 text-sm font-bold ${idealChipClass(cmp.pct)}`}>
+                {cmp.pct >= 100 ? `🏅 ${cmp.pct}% — вы опережаете идеал!` : `${cmp.pct}% от линии идеала`}
+              </span>
+            </div>
+            <IdealLineChart line={cmp.line} />
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
+              <span>
+                <b className="text-emerald-700">— вы</b> · <b className="text-amber-700">- - идеал</b> · серый пунктир — цена при приёмке
+              </span>
+              <span>
+                {cmp.pct >= 100 ? `преимущество ${fmtValue(-cmp.gap)}` : `отставание ${fmtValue(cmp.gap)}`}
+              </span>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              Теневой суперуправленец принял ту же сеть «как есть» и играет те же месяцы без ошибок:
+              те же спрос, рынок и скамейка — только верные ходы. Догоните линию, а удача иногда выносит и выше неё.
+              {cmp.moves.length > 0 && <> В этом месяце идеал: {cmp.moves.join('; ')}.</>}
+            </p>
+          </section>
+        )}
 
         {/* Эталон: команда мечты — сравнение штата с идеалом */}
         {idealInfo && (
@@ -954,6 +1075,67 @@ export default function BravoSimulator() {
 function quadraChip(q: QuadraId): string {
   const c = QUADRA_COLORS[q]
   return `${c.fill} ${c.text} border-slate-200`
+}
+
+/**
+ * График «Линия идеального управления»: зелёная линия — компания игрока,
+ * золотой пунктир — теневой идеальный управляющий в тех же условиях,
+ * серая горизонталь — цена сети на момент приёмки.
+ */
+function IdealLineChart({ line, height = 140 }: { line: IdealLinePoint[]; height?: number }) {
+  const W = 640
+  const PL = 10
+  const PR = 10
+  const PT = 12
+  const PB = 20
+  const all = line.flatMap((p) => [p.player, p.ideal])
+  const min = Math.min(...all)
+  const max = Math.max(...all)
+  const span = max - min || 1
+  const x = (i: number) => (line.length > 1 ? PL + (W - PL - PR) * (i / (line.length - 1)) : PL)
+  const y = (v: number) => PT + (height - PT - PB) * (1 - (v - min) / span)
+  const path = (key: 'player' | 'ideal') =>
+    line.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ')
+  const last = line[line.length - 1]
+  const ahead = last.player >= last.ideal
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${height}`}
+      className="mt-3 mx-auto w-full max-w-3xl h-auto"
+      role="img"
+      aria-label="График: ваша стоимость против линии идеального управления"
+    >
+      {/* горизонталь приёмки: всё, что выше — рост, что ниже — потеря */}
+      <line
+        x1={PL} x2={W - PR} y1={y(line[0].player)} y2={y(line[0].player)}
+        stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 4"
+      />
+      <path d={path('ideal')} fill="none" stroke="#d97706" strokeWidth="2" strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
+      <path d={path('player')} fill="none" stroke="#047857" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={x(line.length - 1)} cy={y(last.ideal)} r="3.5" fill="#d97706" />
+      <circle cx={x(line.length - 1)} cy={y(last.player)} r="4" fill="#047857" />
+      {/* подписи последней точки */}
+      <text
+        x={Math.min(x(line.length - 1) + 6, W - 120)} y={y(last.ideal) - 5}
+        fontSize="11" fill="#b45309"
+      >
+        идеал {fmtValue(last.ideal)}
+      </text>
+      <text
+        x={Math.min(x(line.length - 1) + 6, W - 120)}
+        y={ahead ? y(last.player) + 14 : y(last.player) - 5}
+        fontSize="11" fontWeight="bold" fill="#047857"
+      >
+        вы {fmtValue(last.player)}
+      </text>
+      {/* месяцы */}
+      {line.map((p, i) => (
+        <text key={p.month} x={x(i)} y={height - 6} fontSize="10" fill="#94a3b8" textAnchor="middle">
+          {p.month}
+        </text>
+      ))}
+    </svg>
+  )
 }
 
 function Disclaimer() {
