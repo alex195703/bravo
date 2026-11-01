@@ -592,6 +592,111 @@ export function cohesion(cabinet: Cabinet): number {
   return Math.max(0, Math.min(100, Math.round(50 + sum)))
 }
 
+// ---------- ПУЛЬС СЕТИ: стоимость компании ----------
+
+/** Базовая стоимость сети из четырёх магазинов, грн */
+export const VALUE_BASE = 40_000_000
+/** Вклад руководителя с итоговым рейтингом 100% в стоимость, грн */
+export const POST_VALUE_MAX = 3_500_000
+/** Штраф за каждую пустую должность, грн */
+export const VACANCY_VALUE_PENALTY = 1_200_000
+/** Вклад психологии команды: +2 млн при сплочённости 100%, −2 млн при 0% */
+export const COMBO_VALUE_MAX = 2_000_000
+/** Штраф за каждый 1% перерасхода ФОТ, грн */
+export const PAYROLL_VALUE_PENALTY = 80_000
+/** Потолок штрафа за перерасход ФОТ, грн */
+export const PAYROLL_VALUE_CAP = 2_000_000
+
+/**
+ * Рыночный множитель стоимости: на голодном рынке хороший
+ * руководитель ценнее — команда, собранная в дефицит, стоит дороже.
+ * Так выбранные рыночные ограничения влияют на главный счёт.
+ */
+export const MODE_VALUE_MULT: Record<MarketMode, number> = {
+  plenty: 1.0, normal: 1.15, drought: 1.3,
+}
+
+/** Красивая строка множителя для подсказок: ×1,15 */
+export const MODE_VALUE_LABEL: Record<MarketMode, string> = {
+  plenty: '×1', normal: '×1,15', drought: '×1,3',
+}
+
+/** «56,4 млн грн» — стоимость компании всегда в миллионах */
+export function fmtValue(n: number): string {
+  return `${(n / 1_000_000).toFixed(1).replace('.', ',')} млн грн`
+}
+
+/** Округление до 10 тыс. грн — чтобы цифры были аккуратными */
+const round10k = (n: number): number => Math.round(n / 10_000) * 10_000
+
+/** Вклад одного руководителя: итоговый рейтинг × рыночный множитель */
+export function postContribution(fit: number, mode: MarketMode): number {
+  return round10k(POST_VALUE_MAX * (fit / 100) * MODE_VALUE_MULT[mode])
+}
+
+export interface ValuePart {
+  label: string
+  amount: number
+  hint?: string
+}
+
+export interface CompanyValue {
+  total: number          // итоговая стоимость, грн
+  base: number           // базовая стоимость сети
+  teamCapital: number    // Σ вкладов руководителей (с множителем рынка)
+  combo: number          // вклад сплочённости: может быть отрицательным
+  vacancyPenalty: number // штраф за пустые должности: ≤ 0
+  payrollPenalty: number // штраф за перерасход ФОТ: ≤ 0
+  cohesionValue: number  // сплочённость, из которой посчитан combo
+  parts: ValuePart[]     // готовая разбивка для дашборда и отчёта
+  perPost: { post: Post; fit: number; contribution: number }[]
+}
+
+/**
+ * ПУЛЬС СЕТИ — стоимость компании, считается на лету из текущего
+ * кабинета. Каждое отдельное решение (назначение, вакансия) видно
+ * в деньгах сразу, комбинация типов — через сплочённость, выбранные
+ * рыночные ограничения — через множитель MODE_VALUE_MULT.
+ */
+export function companyValue(cabinet: Cabinet, pool: Candidate[], mode: MarketMode): CompanyValue {
+  const candOf = (ru: string): Candidate =>
+    pool.find((c) => c.ru === ru) ?? {
+      ru, name: typeByRu(ru).name, age: 40, years: 10,
+      profession: bestPostFor(typeByRu(ru)).post.id,
+      education: 'Профильный вуз', achievement: '', salary: 0, tagline: '',
+    }
+  const perPost: CompanyValue['perPost'] = []
+  let teamCapital = 0
+  let vacancies = 0
+  for (const post of POSTS) {
+    const ru = cabinet[post.id]
+    if (!ru) { vacancies++; continue }
+    const fit = overallFit(candOf(ru), post)
+    const contribution = postContribution(fit, mode)
+    perPost.push({ post, fit, contribution })
+    teamCapital += contribution
+  }
+  const vacancyPenalty = -vacancies * VACANCY_VALUE_PENALTY
+  const cohesionValue = cohesion(cabinet)
+  const combo = round10k((COMBO_VALUE_MAX * (cohesionValue - 50)) / 50)
+  const pay = payroll(cabinet, pool)
+  const overPct = pay > PAYROLL_BUDGET ? (pay / PAYROLL_BUDGET - 1) * 100 : 0
+  const payrollPenalty = overPct > 0
+    ? -Math.min(PAYROLL_VALUE_CAP, round10k(overPct * PAYROLL_VALUE_PENALTY))
+    : 0
+  const total = VALUE_BASE + teamCapital + combo + vacancyPenalty + payrollPenalty
+
+  const parts: ValuePart[] = [
+    { label: 'База сети', amount: VALUE_BASE, hint: 'четыре магазина и план на пятый' },
+    { label: 'Качество назначений', amount: teamCapital, hint: `итоги × множитель рынка ${MODE_VALUE_LABEL[mode]}` },
+    { label: 'Психология команды', amount: combo, hint: `сплочённость ${cohesionValue}%` },
+  ]
+  if (vacancies > 0) parts.push({ label: 'Вакансии', amount: vacancyPenalty, hint: `${vacancies} пустых должностей` })
+  if (payrollPenalty < 0) parts.push({ label: 'Перерасход ФОТ', amount: payrollPenalty })
+
+  return { total, base: VALUE_BASE, teamCapital, combo, vacancyPenalty, payrollPenalty, cohesionValue, parts, perPost }
+}
+
 export interface RankInfo {
   rank: 'S' | 'A' | 'B' | 'C' | 'D'
   overall: number
@@ -608,6 +713,8 @@ export interface RankInfo {
   poolSize?: number
   absent?: string[]
   benchCount?: number
+  /** Пульс сети: стоимость компании с разбивкой (заполняется при наличии рынка) */
+  value?: CompanyValue
 }
 
 export interface MarketContext {
@@ -728,10 +835,13 @@ export function buildReport(
     if (avgFit < 55) risks.push('Средний итоговый рейтинг низкий: команду пришлось набирать «из того, что было».')
   }
 
+  const value = market ? companyValue(cabinet, pool, market.mode) : undefined
+
   return {
     rank, overall, avgCrisis, avgFit, avgProf, cohesionValue,
     payroll: pay, payrollOver, strengths, risks,
     mode: market?.mode, poolSize: market?.poolSize, absent: market?.absent, benchCount: market?.benchCount,
+    value,
   }
 }
 
