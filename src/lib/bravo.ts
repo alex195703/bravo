@@ -400,11 +400,11 @@ export function payroll(cabinet: Cabinet, pool: Candidate[]): number {
  * НЕ встречающиеся в exclude. Палитра 16 типов целиком
  * недоступна — это и есть главная реалистичная механика.
  */
-export function generateMarket(mode: MarketMode, exclude: string[] = []): Candidate[] {
+export function generateMarket(mode: MarketMode, exclude: string[] = [], usedNames: Set<string> = new Set()): Candidate[] {
   const size = MARKET_MODES[mode].size
   const available = TYPES.filter((t) => !exclude.includes(t.ru))
   const chosen = shuffle([...available]).slice(0, Math.min(size, available.length))
-  const names = new Set<string>()
+  const names = new Set(usedNames)
   return chosen.map((t) => {
     const c = makeCandidate(t, names)
     names.add(c.name)
@@ -1203,12 +1203,24 @@ function rollLabor(): MarketMode {
 /** Скамейка месяца: кандидаты, которых нет в штате, и их немного */
 function newBench(game: LiveGame): Candidate[] {
   const busy = POSTS.map((p) => game.slots[p.id]?.ru).filter((x): x is string => !!x)
-  const fresh = generateMarket(game.labor, busy)
+  // Имена штатных не переиспользуем: две «Анны Петровой» в одной сети читаются как баг
+  const usedNames = new Set(game.roster.map((c) => c.name))
+  const fresh = generateMarket(game.labor, busy, usedNames)
   const picked = fresh.slice(0, LIVE_BENCH_SIZE[game.labor])
-  // Суперуправленец — редкий гость: с месяца 2 он может выйти на рынок
+  // Суперуправленец — редкий гость: с месяца 2 он может выйти на рынок.
+  // Его тип — эталон должности, и занятый тип нельзя выпускать дважды:
+  // в базе тип — ключ человека, двойники ломают состав. Поэтому звезда
+  // выбирает должность, чей эталонный тип свободен (и в кресле, и на
+  // скамейке) — так частота выхода остаётся ~12% месяцев.
   if (game.month >= 2 && Math.random() < SUPER_CHANCE) {
-    const post = POSTS[Math.floor(Math.random() * POSTS.length)]
-    picked.push(makeSuper(post, new Set(game.roster.map((c) => c.name))))
+    const freePosts = POSTS.filter((p) => {
+      const t = idealTypeFor(p)
+      return !busy.includes(t.ru) && !picked.some((c) => c.ru === t.ru)
+    })
+    if (freePosts.length > 0) {
+      const post = freePosts[Math.floor(Math.random() * freePosts.length)]
+      picked.push(makeSuper(post, new Set(game.roster.map((c) => c.name))))
+    }
   }
   return picked
 }
@@ -1566,12 +1578,13 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
     history: [...game.ideal.history, { month: game.month, value: idealValue }],
     moves: game.ideal.moves,
   }
-  const benchRus = new Set(game.bench)
-  // Сотрудники определяются по креслам — самый надёжный источник истины
+  // Сотрудники определяются по креслам — самый надёжный источник истины.
+  // (Раньше здесь вычищали ещё и «совпавших со скамейкой» — из-за этого
+  // дубль типа ломал состав: сотрудника удалял выход звёзды с тем же типом.)
   const employeeRus = new Set(
     POSTS.map((p) => slots[p.id]?.ru).filter((x): x is string => !!x),
   )
-  const employeesOnly = game.roster.filter((c) => employeeRus.has(c.ru) && !benchRus.has(c.ru))
+  const employeesOnly = game.roster.filter((c) => employeeRus.has(c.ru))
   const labor: MarketMode = finished ? game.labor : rollLabor()
   const demand: DemandMode = finished ? game.demand : rollDemand()
   const interim: LiveGame = { ...game, month, cash, labor, demand, slots, roster: employeesOnly, bench: [], history }
