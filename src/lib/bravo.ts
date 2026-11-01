@@ -1032,6 +1032,62 @@ export const LIVE_BENCH_SIZE: Record<MarketMode, number> = { plenty: 5, normal: 
 /** Кресло: сотрудник (тип, ru) или вакансия со стажем простоя */
 export interface SlotState { ru: string | null; vacantMonths: number }
 
+// ---------- ЛИНИЯ ИДЕАЛЬНОГО УПРАВЛЕНИЯ ----------
+//
+// Отзыв игрока: «действия игрока должна сопровождать линия идеального
+// управления в данных условиях, к которой нужно стремиться. Игрок может
+// иногда опережать эту линию за счёт случайности и неполной
+// предсказуемости мира». Отсюда теневой управляющий: параллельная
+// компания, которая приняла ТАКУ ЖЕ сеть «как есть» и живёт в тех же
+// условиях (тот же спрос, тот же рынок труда, та же скамейка, те же
+// суперуправленцы), но каждый месяц делает безошибочные кадровые ходы.
+// Его стоимость по месяцам — линия идеала на графике. Обогнать её можно
+// только удачей: теневой управляющий не ясновидящий — он жадный и
+// тратит кассу сразу, а игрок, сберёгший деньги, может поймать
+// суперуправленца раньше и дешевле.
+
+/** Теневая компания идеального управляющего */
+export interface IdealState {
+  /** касса теневой компании, грн */
+  cash: number
+  /** должность → кресло теневой компании */
+  slots: Record<string, SlotState>
+  /** сотрудники теневой компании (кандидаты из той же базы) */
+  roster: Candidate[]
+  /** стоимость на конец каждого закрытого месяца — точки линии идеала */
+  history: { month: number; value: number }[]
+  /** что идеал сделал в текущем месяце — для панели сравнения */
+  moves: string[]
+}
+
+/** Точка линии: стоимость игрока и идеала на один месяц */
+export interface IdealLinePoint { month: number; player: number; ideal: number }
+
+/** Сравнение игрока с линией идеала на данный момент */
+export interface IdealCompare {
+  /** стоимость теневой компании прямо сейчас, грн */
+  idealValue: number
+  /** стоимость компании игрока прямо сейчас, грн */
+  playerValue: number
+  /** % игрока от идеала (может быть больше 100 — опережение) */
+  pct: number
+  /** отставание, грн: > 0 — идеал впереди, < 0 — игрок опережает */
+  gap: number
+  /** линия по месяцам: месяц 0 (приёмка) + все закрытые месяцы */
+  line: IdealLinePoint[]
+  /** что идеал сделал в текущем месяце */
+  moves: string[]
+}
+
+/** Минимальный итог, ниже которого идеал не берёт кандидата */
+export const IDEAL_MIN_FIT = 55
+/** При долгом простое идеал готов взять середняка */
+export const IDEAL_RESCUE_FIT = 45
+/** Замена только если новый заметно лучше старого */
+export const IDEAL_SWAP_GAIN = 10
+/** Не больше замен за один месяц — идеал тоже платит секверансы */
+export const IDEAL_MAX_SWAPS = 2
+
 export interface MonthEvent { text: string; kind: 'good' | 'bad' | 'neutral' }
 
 /** Итоги закрытого месяца — для панели «итоги» и финальной истории */
@@ -1073,10 +1129,18 @@ export interface LiveGame {
   history: MonthLog[]
   /** стоимость компании на момент приёмки */
   startValue: number
+  /** теневой идеальный управляющий — источник линии идеала */
+  ideal: IdealState
 }
 
+/**
+ * Достаточный срез состояния для расчётов (кресла, люди, конъюнктура):
+ * и живая партия, и теневая компания идеала передаются одним типом.
+ */
+export type LiveCore = Pick<LiveGame, 'slots' | 'roster' | 'labor' | 'demand'>
+
 /** Кабинет живой компании в общем формате (стоимость, ФОТ, сплочённость) */
-export function liveCabinet(game: LiveGame): Cabinet {
+export function liveCabinet(game: LiveCore): Cabinet {
   const cab: Cabinet = {}
   for (const p of POSTS) cab[p.id] = game.slots[p.id]?.ru ?? null
   return cab
@@ -1088,7 +1152,7 @@ export function vacancyFineFor(vacantMonths: number): number {
 }
 
 /** Суммарный штраф за простаивающие кресла, грн/мес */
-export function liveVacancyFine(game: LiveGame): number {
+export function liveVacancyFine(game: LiveCore): number {
   let sum = 0
   for (const p of POSTS) {
     const s = game.slots[p.id]
@@ -1101,7 +1165,7 @@ export function liveVacancyFine(game: LiveGame): number {
  * Сила команды: средний итог занятых × штраф за вакансии
  * (0,88 в степени «число пустых кресел») × сплочённость.
  */
-export function livePower(game: LiveGame): number {
+export function livePower(game: LiveCore): number {
   let fitSum = 0
   let filled = 0
   let vacancies = 0
@@ -1117,12 +1181,12 @@ export function livePower(game: LiveGame): number {
 }
 
 /** Ожидаемая выручка текущего месяца, грн */
-export function liveRevenue(game: LiveGame): number {
+export function liveRevenue(game: LiveCore): number {
   return round10k(REVENUE_BASE * DEMAND_MODES[game.demand].revenueMult * livePower(game))
 }
 
 /** Стоимость компании прямо сейчас (множитель — рынок труда месяца) */
-export function liveValue(game: LiveGame): CompanyValue {
+export function liveValue(game: LiveCore): CompanyValue {
   return companyValue(liveCabinet(game), game.roster, game.labor)
 }
 
@@ -1203,11 +1267,23 @@ export function newLiveGame(): LiveGame {
     bench: [],
     history: [],
     startValue: 0,
+    ideal: { cash: LIVE_CASH_START, slots: {}, roster: [], history: [], moves: [] },
   }
   const benchCandidates = newBench(game)
   game.roster = [...roster, ...benchCandidates]
   game.bench = benchCandidates.map((c) => c.ru)
   game.startValue = liveValue(game).total
+  // Теневой управляющий принимает ту же сеть «как есть» — и сразу делает ходы месяца 1
+  game.ideal = idealMoves(
+    {
+      cash: LIVE_CASH_START,
+      slots: Object.fromEntries(POSTS.map((p) => [p.id, { ...slots[p.id] }])),
+      roster: [...roster],
+      history: [],
+      moves: [],
+    },
+    benchCandidates, game.labor, game.demand,
+  )
   return game
 }
 
@@ -1292,6 +1368,115 @@ export function fireEmployee(game: LiveGame, postId: string): LiveActionResult {
   }
 }
 
+// ---------- Теневой управляющий: ходы идеала ----------
+
+/** Вид теневой компании для общих расчётов — теми же формулами */
+function idealView(st: IdealState, labor: MarketMode, demand: DemandMode): LiveCore {
+  return { slots: st.slots, roster: st.roster, labor, demand }
+}
+
+/** Кадровая выплата в теневой компании: подъёмные + секверанс, грн */
+function idealCost(st: IdealState, cand: Candidate, postId: string): number {
+  const oldRu = st.slots[postId]?.ru ?? null
+  const old = oldRu ? st.roster.find((c) => c.ru === oldRu) : null
+  const severance = old ? old.salary * SEVERANCE_MONTHS : 0
+  return cand.salary * SIGNING_BONUS_MONTHS + severance
+}
+
+/**
+ * Ходы идеального управляющего на месяц: он видит ту же скамейку,
+ * что и игрок. Сначала закрывает вакансии (старейшие — первыми,
+ * суперуправленца берёт всегда), потом меняет любого, кто проигрывает
+ * скамейке 10 и больше пунктов, — но не больше двух замен за месяц,
+ * ведь секверансы тоже платятся. Жадный, но не ясновидящий: кассу
+ * расходует сразу, поэтому игрок, сберёгший деньги, может
+ * поймать суперуправленца раньше и обогнать линию.
+ */
+export function idealMoves(
+  st: IdealState, bench: Candidate[], labor: MarketMode, demand: DemandMode,
+): IdealState {
+  // labor и demand нужны для единого контракта: ходы идеала от них не зависят
+  void labor; void demand
+  let cur: IdealState = {
+    cash: st.cash, slots: { ...st.slots }, roster: [...st.roster],
+    history: st.history, moves: [],
+  }
+  const taken = new Set<string>()
+  const bestFor = (postId: string): { c: Candidate; fit: number } | null => {
+    const post = POSTS.find((p) => p.id === postId)
+    if (!post) return null
+    let best: { c: Candidate; fit: number } | null = null
+    for (const c of bench) {
+      if (taken.has(c.ru) || cur.roster.some((e) => e.ru === c.ru)) continue
+      const fit = overallFit(c, post)
+      if (!best || fit > best.fit) best = { c, fit }
+    }
+    return best
+  }
+  const hire = (postId: string, c: Candidate, fit: number, replacing: boolean): void => {
+    if (cur.cash < idealCost(cur, c, postId)) return
+    const oldRu = cur.slots[postId]?.ru ?? null
+    const old = replacing && oldRu ? cur.roster.find((e) => e.ru === oldRu) : null
+    const post = POSTS.find((p) => p.id === postId)
+    if (!post) return
+    cur = {
+      ...cur,
+      cash: cur.cash - idealCost(cur, c, postId),
+      slots: { ...cur.slots, [postId]: { ru: c.ru, vacantMonths: 0 } },
+      roster: old ? cur.roster.filter((e) => e.ru !== old.ru).concat(c) : cur.roster.concat(c),
+      moves: [...cur.moves, old
+        ? `«${post.title}» — меняет ${old.name} (итог был ${overallFit(old, post)}%) на ${c.name} (${fit}%)`
+        : `«${post.title}» — нанимает ${c.name} (${fit}%)`],
+    }
+    taken.add(c.ru)
+  }
+  // 1. Вакансии: самые старые простои — первыми
+  const vacant = POSTS.filter((p) => !cur.slots[p.id]?.ru)
+    .sort((a, b) => (cur.slots[b.id]?.vacantMonths ?? 0) - (cur.slots[a.id]?.vacantMonths ?? 0))
+  for (const post of vacant) {
+    const best = bestFor(post.id)
+    if (!best) continue
+    const idle = cur.slots[post.id]?.vacantMonths ?? 0
+    const worth = best.c.super || best.fit >= IDEAL_MIN_FIT || (idle >= 2 && best.fit >= IDEAL_RESCUE_FIT)
+    if (worth) hire(post.id, best.c, best.fit, false)
+  }
+  // 2. Замены: слабых и переоплаченных — под заметно лучших
+  const swaps: { postId: string; c: Candidate; fit: number; gain: number }[] = []
+  for (const post of POSTS) {
+    const ru = cur.slots[post.id]?.ru
+    if (!ru) continue
+    const old = cur.roster.find((e) => e.ru === ru)
+    if (!old) continue
+    const best = bestFor(post.id)
+    if (!best) continue
+    const curFit = overallFit(old, post)
+    const gain = best.fit - curFit
+    if (best.c.super ? gain >= 5 : gain >= IDEAL_SWAP_GAIN) {
+      swaps.push({ postId: post.id, c: best.c, fit: best.fit, gain })
+    }
+  }
+  swaps.sort((a, b) => b.gain - a.gain)
+  for (const s of swaps.slice(0, IDEAL_MAX_SWAPS)) hire(s.postId, s.c, s.fit, true)
+  return cur
+}
+
+/**
+ * Сравнение игрока с линией идеального управления прямо сейчас:
+ * две стоимости, процент, отставание и точки для графика.
+ */
+export function idealCompare(game: LiveGame): IdealCompare {
+  const view = idealView(game.ideal, game.labor, game.demand)
+  const idealValue = liveValue(view).total
+  const playerValue = liveValue(game).total
+  const line: IdealLinePoint[] = [{ month: 0, player: game.startValue, ideal: game.startValue }]
+  game.history.forEach((h, i) => {
+    const p = game.ideal.history[i]
+    line.push({ month: h.month, player: h.value, ideal: p ? p.value : h.value })
+  })
+  const pct = idealValue > 0 ? Math.round((playerValue / idealValue) * 100) : 100
+  return { idealValue, playerValue, pct, gap: idealValue - playerValue, line, moves: game.ideal.moves }
+}
+
 /** Закрыть месяц: обороты, простой, стоимость — и время идёт дальше */
 export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean } {
   const cab = liveCabinet(game)
@@ -1330,6 +1515,20 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
     kind: valueDelta >= 0 ? 'good' : 'bad',
   })
 
+  // Теневой идеал проживает этот же месяц в тех же условиях:
+  // та же выручка за силу команды, тот же спрос, тот же простой
+  const iView = idealView(game.ideal, game.labor, game.demand)
+  const iRev = round10k(REVENUE_BASE * DEMAND_MODES[game.demand].revenueMult * livePower(iView))
+  const iPay = payroll(liveCabinet(iView), game.ideal.roster)
+  const iOpex = round10k(OPEX_BASE * DEMAND_MODES[game.demand].opexMult)
+  const iFine = liveVacancyFine(iView)
+  const idealCash = Math.max(0, game.ideal.cash + iRev - iPay - iOpex - iFine)
+  const idealValue = liveValue(iView).total
+  const idealPct = idealValue > 0 ? Math.round((value / idealValue) * 100) : 100
+  events.push(idealPct >= 100
+    ? { text: `🥇 Идеал в этих условиях: ${fmtValue(idealValue)} — вы опережаете линию идеального управления!`, kind: 'good' }
+    : { text: `🥇 Идеал в этих условиях: ${fmtValue(idealValue)} — вы на ${idealPct}% от его линии`, kind: 'neutral' })
+
   const left = game.bench
     .map((ru) => game.roster.find((c) => c.ru === ru))
     .filter((c): c is Candidate => !!c)
@@ -1352,6 +1551,21 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
       ? { ru: null, vacantMonths: s.vacantMonths + 1 }
       : { ru: s?.ru ?? null, vacantMonths: 0 }
   }
+  // У теневого идеала кресла стареют так же
+  const idealSlots: Record<string, SlotState> = {}
+  for (const p of POSTS) {
+    const s = game.ideal.slots[p.id]
+    idealSlots[p.id] = s && !s.ru
+      ? { ru: null, vacantMonths: s.vacantMonths + 1 }
+      : { ru: s?.ru ?? null, vacantMonths: 0 }
+  }
+  const idealState: IdealState = {
+    cash: idealCash,
+    slots: idealSlots,
+    roster: game.ideal.roster,
+    history: [...game.ideal.history, { month: game.month, value: idealValue }],
+    moves: game.ideal.moves,
+  }
   const benchRus = new Set(game.bench)
   // Сотрудники определяются по креслам — самый надёжный источник истины
   const employeeRus = new Set(
@@ -1362,7 +1576,11 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const demand: DemandMode = finished ? game.demand : rollDemand()
   const interim: LiveGame = { ...game, month, cash, labor, demand, slots, roster: employeesOnly, bench: [], history }
   const fresh = finished ? [] : newBench(interim)
-  const next: LiveGame = { ...interim, roster: [...employeesOnly, ...fresh], bench: fresh.map((c) => c.ru) }
+  // Идеал тут же делает свои ходы в новом месяце — линия всегда на месяц впереди игрока по решениям
+  const idealNext = finished
+    ? idealState
+    : idealMoves(idealState, fresh, labor, demand)
+  const next: LiveGame = { ...interim, roster: [...employeesOnly, ...fresh], bench: fresh.map((c) => c.ru), ideal: idealNext }
   // Выход суперуправленца — событие месяца: мимо такой новости пройти нельзя
   const star = fresh.find((c) => c.super)
   if (star) {
