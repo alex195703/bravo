@@ -3,57 +3,38 @@
 // ============================================================
 // ТОРГОВАЯ СЕТЬ «БРАВО» — интерфейс
 // ------------------------------------------------------------
-// Четвёртый учебный проект. Логика и данные — в src/lib/
-// (bravo.ts + relations.ts), здесь только React.
-// Экраны: рынок труда → собеседования → штаб сети
-// (карта отношений + кризисы) → итоговый отчёт.
-// Реалистичный найм: сначала компетентность и опыт
-// (65% итогового рейтинга), потом психология (35%).
-// И на рынке доступны НЕ все 16 типов — команда
-// набирается из того, что есть.
+// Сценарий «Компания как есть»: вы принимаете сеть в текущем
+// состоянии и ведёте её 12 месяцев. Каждый месяц — решения
+// (нанять / заменить / уволить / ничего), конъюнктура спроса
+// и рынка труда, скамейка кандидатов, которая уходит в конце
+// месяца. Прокрастинация наказуема: вакансии капают деньгами,
+// а счёт игры — стоимость компании в миллионах гривен.
+// Логика и данные — в src/lib/bravo.ts, здесь только React.
 // Прогресс хранится в localStorage.
 // ============================================================
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { TYPES, QUADRAS, FUNCTIONS, type QuadraId } from '@/lib/socionics-data'
+import { TYPES, type QuadraId } from '@/lib/socionics-data'
+import { QUADRA_COLORS } from '@/lib/relations'
 import { typeByRu, label } from '@/lib/socionics-quiz'
 import {
-  relationBetween, RELATION_INFO_14, RELATION_CATEGORY,
-  CATEGORY_COLORS, PAIR_SCORE, QUADRA_COLORS,
-} from '@/lib/relations'
-import {
-  POSTS, CRISES, MARKET_MODES, EMPTY_TEAM, PAYROLL_BUDGET,
-  postFit, fitStars, profFit, overallFit, bestPostForCandidate,
-  payroll, simulateCrisis, buildReport, cohesion, fmtMoney,
-  companyValue, postContribution, fmtValue, VACANCY_VALUE_PENALTY,
-  generateMarket, rerollBench, absentTypes, autoAssemble, normalizeCandidate,
-  type Candidate, type MarketMode, type Cabinet, type CrisisResult, type RankInfo,
+  POSTS, MARKET_MODES, PAYROLL_BUDGET,
+  fitStars, profFit, postFit, overallFit,
+  payroll, cohesion, fmtMoney, fmtValue, VACANCY_VALUE_PENALTY,
+  normalizeCandidate, DEMAND_MODES, LIVE_MONTHS,
+  SEVERANCE_MONTHS, SIGNING_BONUS_MONTHS,
+  newLiveGame, liveValue, liveRevenue, liveVacancyFine, liveCabinet,
+  hireCost, hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
+  type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
+  type MarketMode, type Candidate, type HireCost,
 } from '@/lib/bravo'
 
-type Phase = 'market' | 'hiring' | 'governing' | 'report'
+type Phase = 'intro' | 'manage' | 'final'
 
-const GAME_KEY = 'bravo-game'
-const BEST_KEY = 'bravo-best'
-// Старые ключи от версии, когда сеть называлась «Чудо»:
-// если под новым ключом пусто, читаем оттуда и переносим.
-const LEGACY_GAME_KEY = 'chudo-game'
-const LEGACY_BEST_KEY = 'chudo-best'
+const GAME_KEY = 'bravo-live-game'
+const BEST_KEY = 'bravo-live-best'
 
-interface SavedGame {
-  mode: MarketMode
-  pool: Candidate[]
-  team: Cabinet
-  hunterUsed: boolean
-  phase: Phase
-}
-
-const RANK_STYLE: Record<string, { bg: string; ring: string; text: string }> = {
-  S: { bg: 'bg-emerald-500', ring: 'ring-emerald-200', text: 'text-emerald-700' },
-  A: { bg: 'bg-sky-500', ring: 'ring-sky-200', text: 'text-sky-700' },
-  B: { bg: 'bg-amber-500', ring: 'ring-amber-200', text: 'text-amber-700' },
-  C: { bg: 'bg-orange-500', ring: 'ring-orange-200', text: 'text-orange-700' },
-  D: { bg: 'bg-rose-500', ring: 'ring-rose-200', text: 'text-rose-700' },
-}
+interface SavedBest { value: number; growth: number }
 
 const FIT_BADGE: Record<string, string> = {
   high: 'bg-emerald-100 text-emerald-700 border-emerald-300',
@@ -65,224 +46,138 @@ function fitBadgeClass(fit: number): string {
   return fit >= 75 ? FIT_BADGE.high : fit >= 55 ? FIT_BADGE.mid : FIT_BADGE.low
 }
 
-/** «+2,6 млн грн» / «−1,2 млн грн» — вклад в стоимость со знаком */
+/** «+2,6 млн грн» / «−1,2 млн грн» — деньги со знаком */
 function signedMoney(n: number): string {
   return n >= 0 ? `+${fmtValue(n)}` : `−${fmtValue(Math.abs(n))}`
 }
 
+/** Восстановление партии из сохранения: битые данные отбрасываем */
+function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
+  try {
+    const month = Number(parsed.month)
+    const cash = Number(parsed.cash)
+    if (!(month >= 1 && month <= LIVE_MONTHS) || !(cash >= 0)) return null
+    const labor: MarketMode = parsed.labor && parsed.labor in MARKET_MODES ? parsed.labor : 'normal'
+    const demand: DemandMode = parsed.demand && parsed.demand in DEMAND_MODES ? parsed.demand : 'steady'
+    if (!parsed.slots || typeof parsed.slots !== 'object') return null
+    const rawSlots = parsed.slots as Record<string, { ru?: unknown; vacantMonths?: unknown }>
+    const slots: LiveGame['slots'] = {}
+    for (const p of POSTS) {
+      const s = rawSlots[p.id]
+      if (!s) return null
+      const ru = typeof s.ru === 'string' && TYPES.some((t) => t.ru === s.ru) ? s.ru : null
+      const vacantMonths = Number.isFinite(Number(s.vacantMonths))
+        ? Math.max(0, Math.floor(Number(s.vacantMonths)))
+        : 0
+      slots[p.id] = { ru, vacantMonths }
+    }
+    const roster = Array.isArray(parsed.roster)
+      ? parsed.roster
+        .filter((c) => c && typeof c.ru === 'string' && TYPES.some((t) => t.ru === c.ru))
+        .map(normalizeCandidate)
+      : []
+    if (roster.length === 0) return null
+    const busyRus = Object.values(slots).map((s) => s.ru).filter((x): x is string => !!x)
+    const bench = Array.isArray(parsed.bench)
+      ? parsed.bench.filter((ru) =>
+          typeof ru === 'string' &&
+          roster.some((c) => c.ru === ru) &&
+          !busyRus.includes(ru))
+      : []
+    const history = Array.isArray(parsed.history) ? parsed.history : []
+    const startValue = Number(parsed.startValue) > 0 ? Number(parsed.startValue) : 0
+    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue }
+  } catch {
+    return null
+  }
+}
+
 export default function BravoSimulator() {
-  const [phase, setPhase] = useState<Phase>('market')
-  const [intl, setIntl] = useState(false)
-  const [mode, setMode] = useState<MarketMode>('normal')
-  const [pool, setPool] = useState<Candidate[]>([])
-  const [team, setTeam] = useState<Cabinet>({ ...EMPTY_TEAM })
-  const [hunterUsed, setHunterUsed] = useState(false)
-  const [results, setResults] = useState<Record<string, CrisisResult>>({})
-  const [selectedPair, setSelectedPair] = useState<[string, string] | null>(null)
-  const [report, setReport] = useState<RankInfo | null>(null)
-  const [best, setBest] = useState<{ overall: number; rank: string; value?: number } | null>(null)
+  const [phase, setPhase] = useState<Phase>('intro')
+  const [game, setGame] = useState<LiveGame | null>(null)
+  const [note, setNote] = useState<MonthEvent | null>(null)
+  const [sel, setSel] = useState<{ ru: string; postId: string } | null>(null)
+  const [best, setBest] = useState<SavedBest | null>(null)
   const [isNewBest, setIsNewBest] = useState(false)
+  const [intl, setIntl] = useState(false)
   const hydrated = useRef(false)
 
-  // Читаем сохранённую игру после монтирования (иначе гидратация расходится)
+  // Читаем сохранённую партию после монтирования (иначе гидратация расходится)
   useEffect(() => {
     queueMicrotask(() => {
       try {
-        const raw = localStorage.getItem(GAME_KEY) ?? localStorage.getItem(LEGACY_GAME_KEY)
-        const ruSet = new Set(TYPES.map((t) => t.ru))
-        let restored = false
+        const raw = localStorage.getItem(GAME_KEY)
         if (raw) {
-          const saved = JSON.parse(raw) as Partial<SavedGame>
-          const validMode: MarketMode = saved.mode && saved.mode in MARKET_MODES ? saved.mode : 'normal'
-          const validPhase: Phase =
-            saved.phase === 'hiring' || saved.phase === 'governing' || saved.phase === 'market'
-              ? saved.phase
-              : 'governing' // «отчёт» не сохраняется (результаты кризисов стираются) — возвращаем в штаб
-          const validPool = Array.isArray(saved.pool)
-            ? saved.pool
-              .filter((c) => c && ruSet.has(c.ru) && typeof c.name === 'string')
-              .map(normalizeCandidate)
-            : []
-          if (validPool.length > 0) {
-            setMode(validMode)
-            setPool(validPool)
-            const restoredTeam: Cabinet = { ...EMPTY_TEAM }
-            if (saved.team) {
-              for (const p of POSTS) {
-                const ru = saved.team[p.id]
-                if (ru && ruSet.has(ru)) restoredTeam[p.id] = ru
-              }
-            }
-            setTeam(restoredTeam)
-            setHunterUsed(!!saved.hunterUsed)
-            setPhase(validPhase)
-            restored = true
+          const restored = restoreLiveGame(JSON.parse(raw) as Partial<LiveGame>)
+          if (restored) {
+            setGame(restored)
+            setPhase('manage')
           }
         }
-        if (!restored) setPool(generateMarket('normal'))
-        const rawBest = localStorage.getItem(BEST_KEY) ?? localStorage.getItem(LEGACY_BEST_KEY)
-        if (rawBest) setBest(JSON.parse(rawBest) as { overall: number; rank: string; value?: number })
-        // Зачищаем ключи старой версии («Чудо»): рекорд переносим под новый
-        // ключ, партия при первом же изменении перезапишется автосохранением
-        try {
-          if (rawBest) localStorage.setItem(BEST_KEY, rawBest)
-          localStorage.removeItem(LEGACY_BEST_KEY)
-          localStorage.removeItem(LEGACY_GAME_KEY)
-        } catch { /* приватный режим — не критично */ }
-      } catch {
-        setPool(generateMarket('normal'))
-      }
+        const rawBest = localStorage.getItem(BEST_KEY)
+        if (rawBest) setBest(JSON.parse(rawBest) as SavedBest)
+      } catch { /* приватный режим — играем без сохранений */ }
       hydrated.current = true
     })
   }, [])
 
-  // Игра автосохраняется, но только после восстановления
+  // Партия автосохраняется, но только после восстановления
   useEffect(() => {
-    if (!hydrated.current) return
+    if (!hydrated.current || !game) return
     try {
-      const snapshot: SavedGame = { mode, pool, team, hunterUsed, phase }
-      localStorage.setItem(GAME_KEY, JSON.stringify(snapshot))
-    } catch { /* приватный режим — работаем без сохранений */ }
-  }, [mode, pool, team, hunterUsed, phase])
+      localStorage.setItem(GAME_KEY, JSON.stringify(game))
+    } catch { /* приватный режим */ }
+  }, [game])
 
-  const assigned = useMemo(
-    () => POSTS.filter((p) => team[p.id]).map((p) => ({ post: p, type: typeByRu(team[p.id]!) })),
-    [team],
-  )
-  const usedTypes = useMemo(() => new Set(assigned.map((a) => a.type.ru)), [assigned])
-  const bench = useMemo(() => pool.filter((c) => !usedTypes.has(c.ru)), [pool, usedTypes])
-  const vacantCount = POSTS.length - assigned.length
-  const absent = useMemo(() => absentTypes(pool), [pool])
+  const pulse = useMemo(() => (game ? liveValue(game) : null), [game])
+  const cab = useMemo(() => (game ? liveCabinet(game) : null), [game])
+  const pay = cab && game ? payroll(cab, game.roster) : 0
+  const rev = game ? liveRevenue(game) : 0
+  const fine = game ? liveVacancyFine(game) : 0
+  const coh = cab ? cohesion(cab) : 0
 
-  function newMarket(m: MarketMode): void {
-    setMode(m)
-    setPool(generateMarket(m))
-    setTeam({ ...EMPTY_TEAM })
-    setHunterUsed(false)
-    setResults({})
-    setSelectedPair(null)
-  }
-
-  function refreshMarket(): void {
-    setPool(generateMarket(mode))
-    setHunterUsed(false)
-    setResults({})
-  }
-
-  function useHunter(): void {
-    if (hunterUsed) return
-    setPool(rerollBench(pool, team))
-    setHunterUsed(true)
-  }
-
-  function assign(postId: string, ru: string): void {
-    setTeam((prev) => ({ ...prev, [postId]: ru || null }))
-    setResults({}) // состав изменился — кризисы надо переигрывать
-    setSelectedPair(null)
-  }
-
-  function autoHire(): void {
-    setTeam(autoAssemble(pool))
-    setResults({})
-    setSelectedPair(null)
-  }
-
-  function clearHiring(): void {
-    setTeam({ ...EMPTY_TEAM })
-    setResults({})
-    setSelectedPair(null)
-  }
-
-  function playCrisis(crisisId: string): void {
-    const crisis = CRISES.find((c) => c.id === crisisId)!
-    const result = simulateCrisis(team, crisis, pool)
-    setResults((prev) => ({ ...prev, [crisisId]: result }))
-  }
-
-  function finishReport(): void {
-    const rep = buildReport(team, results, {
-      mode, poolSize: pool.length, absent: absentTypes(pool), benchCount: bench.length,
-    }, pool)
-    setReport(rep)
-    const newBest = !best || rep.overall > best.overall
-    setIsNewBest(newBest)
-    if (newBest) {
-      const record = { overall: rep.overall, rank: rep.rank, value: rep.value?.total }
-      setBest(record)
-      try {
-        localStorage.setItem(BEST_KEY, JSON.stringify(record))
-      } catch { /* приватный режим */ }
-    }
-    setPhase('report')
-  }
-
-  function startNewGame(): void {
-    newMarket(mode)
-    setReport(null)
+  function acceptCompany(): void {
+    setGame(newLiveGame())
+    setNote(null)
+    setSel(null)
     setIsNewBest(false)
-    setPhase('market')
+    setPhase('manage')
   }
 
-  function goGoverning(): void {
-    setSelectedPair(null)
-    setPhase('governing')
+  function doHire(ru: string, postId: string): void {
+    if (!game) return
+    const res = hireCandidate(game, ru, postId)
+    setGame(res.game)
+    setNote(res.event)
+    setSel(null)
   }
 
-  // ---------- Данные для графа ----------
-  const graph = useMemo(() => {
-    const N = POSTS.length
-    const cx = 340
-    const cy = 340
-    const r = 252
-    const nodes = POSTS.map((p, i) => {
-      const angle = ((-90 + (360 / N) * i) * Math.PI) / 180
-      return { post: p, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) }
-    })
-    const edges: { i: number; j: number; kind: string; category: string; score: number }[] = []
-    for (let i = 0; i < N; i++) {
-      for (let j = i + 1; j < N; j++) {
-        const ruA = team[POSTS[i].id]
-        const ruB = team[POSTS[j].id]
-        if (!ruA || !ruB) continue
-        const rel = relationBetween(typeByRu(ruA), typeByRu(ruB))
-        edges.push({
-          i, j, kind: rel.kind,
-          category: RELATION_CATEGORY[rel.kind],
-          score: PAIR_SCORE[rel.kind],
-        })
+  function doFire(postId: string): void {
+    if (!game) return
+    const res = fireEmployee(game, postId)
+    setGame(res.game)
+    setNote(res.event)
+  }
+
+  function doClose(): void {
+    if (!game) return
+    const res = closeMonth(game)
+    setGame(res.game)
+    setNote(null)
+    setSel(null)
+    if (res.finished) {
+      const last = res.game.history[res.game.history.length - 1]
+      const record = { value: last.value, growth: last.value - res.game.startValue }
+      const better = !best || record.growth > best.growth
+      setIsNewBest(better)
+      if (better) {
+        setBest(record)
+        try {
+          localStorage.setItem(BEST_KEY, JSON.stringify(record))
+        } catch { /* приватный режим */ }
       }
+      setPhase('final')
     }
-    return { nodes, edges }
-  }, [team])
-
-  const pairStats = useMemo(() => {
-    let comfy = 0, neutral = 0, tense = 0
-    for (const e of graph.edges) {
-      if (e.category === 'comfy') comfy++
-      else if (e.category === 'neutral') neutral++
-      else tense++
-    }
-    return { comfy, neutral, tense }
-  }, [graph.edges])
-
-  const cohesionValue = useMemo(() => cohesion(team), [team])
-
-  // Пульс сети: стоимость компании пересчитывается на каждом решении
-  const pulse = useMemo(() => companyValue(team, pool, mode), [team, pool, mode])
-
-  const selectedRel = useMemo(() => {
-    if (!selectedPair) return null
-    const a = typeByRu(selectedPair[0])
-    const b = typeByRu(selectedPair[1])
-    const rel = relationBetween(a, b)
-    const postA = POSTS.find((p) => team[p.id] === a.ru)!
-    const postB = POSTS.find((p) => team[p.id] === b.ru)!
-    return { a, b, rel, postA, postB }
-  }, [selectedPair, team])
-
-  function personName(ru: string): string {
-    const c = pool.find((x) => x.ru === ru)
-    return c ? c.name : typeByRu(ru).name
   }
 
   const intlBtn = (
@@ -294,18 +189,36 @@ export default function BravoSimulator() {
     </button>
   )
 
-  // ============ ЭКРАН 1: РЫНОК ТРУДА ============
-  if (phase === 'market') {
+  // ============ ЭКРАН 1: ПРИЁМКА КОМПАНИИ ============
+  if (phase === 'intro' || !game || !pulse) {
+    const rules: { emoji: string; title: string; text: string }[] = [
+      {
+        emoji: '🏚', title: 'Компания как есть',
+        text: 'Штат — чужое наследие: сильные профессионалы, середняки, слабые (кого-то ещё и переоплачивают) и пустые кресла со стажем простоя.',
+      },
+      {
+        emoji: '⚖️', title: 'Ресурсов не хватает',
+        text: 'Касса конечна, сильные кандидаты дороги, идеальных людей на рынке нет. Удовлетворить все критерии сразу невозможно — выбирать, что горит сильнее.',
+      },
+      {
+        emoji: '⏳', title: 'Прокрастинация стоит денег',
+        text: 'Кандидаты уходят в конце месяца. Пустое кресло капает кассе каждый месяц и всё дороже — тянуть нельзя.',
+      },
+      {
+        emoji: '💰', title: 'Счёт — стоимость компании',
+        text: 'Каждое решение видно в гривнах сразу: слабый руководитель, ссоры в команде и простой бьют по цене сети. Рекорд — рост за год.',
+      },
+    ]
     return (
       <div className="min-h-screen bg-slate-100 flex flex-col">
-        <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-8">
+        <main className="flex-1 mx-auto w-full max-w-4xl px-4 py-8">
           <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
                 🛒 Сеть магазинов «Браво»
               </h1>
               <p className="text-slate-500 mt-1 text-sm sm:text-base">
-                Симулятор управления коммерческой организацией: набираем команду из того, что есть
+                Сценарий «Компания как есть»: живой менеджмент на {LIVE_MONTHS} месяцев
               </p>
             </div>
             {intlBtn}
@@ -313,458 +226,49 @@ export default function BravoSimulator() {
 
           <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
             <p className="text-sm sm:text-base text-slate-600">
-              Вы — владелец сети продуктовых магазинов <b>«Браво»</b>: четыре точки и план на пятую.
-              Нанимаем как рациональный работодатель: <b>сначала компетентность и опыт</b>,
-              и лишь потом психологические особенности. Итоговый рейтинг кандидата
-              = <b>65% профпригодность + 35% соответствие типа должности</b>. Но рынок труда
-              живёт по своим правилам: соискатели не покрывают всю палитру из 16 типов —
-              <b> приходится набирать из того, что есть</b>. Каждое кадровое решение
-              теперь видно в деньгах: следите за «Пульсом сети» — стоимостью компании.
+              Вы принимаете сеть из четырёх магазинов <b>в текущем состоянии</b>: часть кресел занята
+              сильными профессионалами, часть — случайными людьми, пара должностей пустует.
+              Нанимаем по-прежнему как рациональный работодатель: <b>сначала компетентность и опыт</b>
+              {' '}(65% итогового рейтинга), потом психология (35%). Но теперь время идёт: рынок труда
+              и спрос покупателей меняются каждый месяц, а решения приходится принимать
+              в условиях, когда <b>денег хватает не на всё</b>.
             </p>
           </section>
 
-          <section className="mb-5">
-            <h2 className="font-semibold text-slate-800 mb-2 px-1">Ситуация на рынке труда</h2>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {(Object.keys(MARKET_MODES) as MarketMode[]).map((m) => {
-                const info = MARKET_MODES[m]
-                const active = m === mode
-                return (
-                  <button
-                    key={m}
-                    onClick={() => newMarket(m)}
-                    aria-pressed={active}
-                    className={`text-left rounded-2xl border-2 p-4 transition ${active
-                      ? 'border-emerald-500 bg-emerald-50 shadow-sm'
-                      : 'border-slate-200 bg-white hover:border-emerald-300'}`}
-                  >
-                    <p className="font-semibold text-slate-800">
-                      <span aria-hidden>{info.emoji}</span> {info.label}
-                    </p>
-                    <p className="text-sm text-slate-500 mt-1">{info.hint}</p>
-                  </button>
-                )
-              })}
-            </div>
-          </section>
-
-          {pool.length === 0 ? (
-            <p className="text-slate-400 py-8 text-center">Формируем рынок труда…</p>
-          ) : (
-            <>
-              <h2 className="font-semibold text-slate-800 mb-3 px-1">Кандидаты ({pool.length})</h2>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mb-5">
-                {pool.map((c) => {
-                  const t = typeByRu(c.ru)
-                  const field = POSTS.find((p) => p.id === c.profession)?.field ?? c.profession
-                  return (
-                    <article key={c.ru} className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 flex flex-col">
-                      <p className="font-semibold text-slate-800 leading-tight">{c.name}</p>
-                      <p className="text-xs text-slate-400">{c.age} лет</p>
-                      <p className="text-sm font-medium text-slate-700 mt-2">
-                        {field} · стаж {c.years} лет
-                      </p>
-                      <p className="text-xs text-slate-500">Образование: {c.education}</p>
-                      <p className="text-sm text-slate-600 mt-1.5 flex-1">«{c.achievement}»</p>
-                      <p className="text-sm font-semibold text-emerald-700 mt-1.5">
-                        от {fmtMoney(c.salary)}/мес
-                      </p>
-                      <p className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-100">
-                        тип {label(t, intl)} — {c.tagline}
-                      </p>
-                    </article>
-                  )
-                })}
-              </div>
-
-              <section className="rounded-2xl bg-white p-4 border border-slate-200 shadow-sm mb-5">
-                <p className="text-sm text-slate-500">
-                  <b className="text-slate-700">На рынке сейчас нет:</b>{' '}
-                  {absent.length === 0 ? '— повезло, вся палитра доступна!' : absent.join(', ')}
-                  <span className="text-slate-400"> · этих специалистов придётся ждать или обходиться без них</span>
-                </p>
+          <div className="grid gap-3 sm:grid-cols-2 mb-5">
+            {rules.map((r) => (
+              <section key={r.title} className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200">
+                <h2 className="font-semibold text-slate-800">
+                  <span aria-hidden>{r.emoji}</span> {r.title}
+                </h2>
+                <p className="mt-1.5 text-sm text-slate-600 leading-relaxed">{r.text}</p>
               </section>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={() => setPhase('hiring')}
-                  className="rounded-xl bg-emerald-600 px-5 py-2.5 font-semibold text-white shadow hover:bg-emerald-500"
-                >
-                  К собеседованиям →
-                </button>
-                <button
-                  onClick={refreshMarket}
-                  title="Пересобрать рынок заново"
-                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
-                >
-                  🔄 Обновить рынок
-                </button>
-                <button
-                  onClick={useHunter}
-                  disabled={hunterUsed}
-                  title="Один раз за игру: заменит двух кандидатов новыми типами, которых ещё не было"
-                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  🧲 Хедхантер {hunterUsed ? '— использован' : '(1 раз)'}
-                </button>
-                {best && (
-                  <span className="ml-auto text-sm text-slate-500">
-                    Рекорд: <b>{best.overall}%</b> (ранг {best.rank}{best.value ? ` · ${fmtValue(best.value)}` : ''})
-                  </span>
-                )}
-              </div>
-            </>
-          )}
-        </main>
-        <Disclaimer />
-      </div>
-    )
-  }
-
-  // ============ ЭКРАН 4: ИТОГОВЫЙ ОТЧЁТ ============
-  if (phase === 'report' && report) {
-    const style = RANK_STYLE[report.rank]
-    const playedCount = CRISES.filter((c) => results[c.id]).length
-    return (
-      <div className="min-h-screen bg-slate-100 flex flex-col">
-        <main className="flex-1 mx-auto w-full max-w-4xl px-4 py-8">
-          <div className="text-center mb-6">
-            <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">Итоговый отчёт для владельца</h1>
-            {isNewBest && (
-              <p className="mt-1 inline-block rounded-full bg-amber-100 border border-amber-300 px-3 py-0.5 text-sm font-semibold text-amber-700">
-                🏆 Новый рекорд!
-              </p>
-            )}
-          </div>
-
-          <section className="rounded-3xl bg-white p-6 sm:p-8 shadow-sm border border-slate-200 text-center mb-5">
-            <div className={`mx-auto flex h-28 w-28 items-center justify-center rounded-full ${style.bg} ring-8 ${style.ring} text-white text-5xl font-black`}>
-              {report.rank}
-            </div>
-            <p className="mt-4 text-4xl font-bold text-slate-800">{report.overall}%</p>
-            <p className="text-slate-500">общая оценка команды</p>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-left">
-              <Bar title="Кризисы (среднее)" value={report.avgCrisis} hint={`${playedCount} из ${CRISES.length} отыграно`} color="bg-sky-500" />
-              <Bar title="Профессиональный уровень" value={report.avgProf} hint="средняя профпригодность нанятых" color="bg-teal-500" />
-              <Bar title="Итог назначений" value={report.avgFit} hint="65% проф + 35% соционика" color="bg-emerald-500" />
-              <Bar title="Сплочённость" value={report.cohesionValue} hint="по парам менеджеров" color="bg-amber-500" />
-            </div>
-          </section>
-
-          {report.value && (
-            <section aria-label="Пульс сети: стоимость компании" className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h2 className="font-semibold text-slate-800">💹 Пульс сети — стоимость компании</h2>
-                <p className="text-2xl sm:text-3xl font-black text-slate-800">{fmtValue(report.value.total)}</p>
-              </div>
-              <ul className="mt-3 divide-y divide-slate-100">
-                {report.value.parts.map((part) => (
-                  <li key={part.label} className="flex items-baseline justify-between gap-3 py-1.5 text-sm">
-                    <span className="text-slate-600">
-                      {part.label}
-                      {part.hint && <span className="text-slate-400"> · {part.hint}</span>}
-                    </span>
-                    <b className={part.label === 'База сети' ? 'text-slate-800' : part.amount < 0 ? 'text-rose-600' : 'text-emerald-700'}>
-                      {part.label === 'База сети' ? fmtValue(part.amount) : signedMoney(part.amount)}
-                    </b>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {report.mode && (
-            <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
-              <h2 className="font-semibold text-slate-800 mb-2">Кадровый контекст</h2>
-              <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-600">
-                <span>Рынок: <b>{MARKET_MODES[report.mode].label}</b></span>
-                <span>Кандидатов было: <b>{report.poolSize}</b> из 16 типов</span>
-                <span>В запасе осталось: <b>{report.benchCount}</b></span>
-                {report.payroll > 0 && (
-                  <span>
-                    ФОТ: <b>{fmtMoney(report.payroll)}</b>
-                    {report.payrollOver > 0
-                      ? <span className="text-rose-600"> (+{report.payrollOver}% к бюджету)</span>
-                      : <span className="text-slate-400"> из {fmtMoney(PAYROLL_BUDGET)}</span>}
-                  </span>
-                )}
-              </div>
-              {report.absent && report.absent.length > 0 && (
-                <p className="text-sm text-slate-500 mt-2">
-                  Не хватало типов: <span className="text-slate-700 font-medium">{report.absent.join(', ')}</span>
-                </p>
-              )}
-            </section>
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2 mb-5">
-            <section className="rounded-2xl bg-white p-5 shadow-sm border border-slate-200">
-              <h2 className="font-semibold text-emerald-700 mb-2">✅ Сильные стороны</h2>
-              <ul className="space-y-2">
-                {report.strengths.map((s, i) => (
-                  <li key={i} className="text-sm text-slate-600 leading-snug">{s}</li>
-                ))}
-              </ul>
-            </section>
-            <section className="rounded-2xl bg-white p-5 shadow-sm border border-slate-200">
-              <h2 className="font-semibold text-amber-700 mb-2">⚠️ Риски</h2>
-              <ul className="space-y-2">
-                {report.risks.map((s, i) => (
-                  <li key={i} className="text-sm text-slate-600 leading-snug">{s}</li>
-                ))}
-              </ul>
-            </section>
+            ))}
           </div>
 
           <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-6">
-            <h2 className="font-semibold text-slate-800 mb-3">Состав команды</h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-slate-400 border-b border-slate-200">
-                    <th className="py-2 pr-3 font-medium">Должность</th>
-                    <th className="py-2 pr-3 font-medium">Человек</th>
-                    <th className="py-2 pr-3 font-medium">Квадра</th>
-                    <th className="py-2 pr-3 font-medium">Профиль</th>
-                    <th className="py-2 pr-3 font-medium">Итог</th>
-                    <th className="py-2 font-medium">Вклад в стоимость</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {POSTS.map((p) => {
-                    const ru = team[p.id]
-                    const t = ru ? typeByRu(ru) : null
-                    const cand = ru ? pool.find((c) => c.ru === ru) : null
-                    const prof = cand ? profFit(cand, p) : 0
-                    const soc = t ? postFit(t, p) : 0
-                    const blended = cand ? overallFit(cand, p) : 0
-                    const field = cand
-                      ? POSTS.find((f) => f.id === cand.profession)?.field ?? cand.profession
-                      : ''
-                    return (
-                      <tr key={p.id} className="border-b border-slate-100 last:border-0">
-                        <td className="py-2 pr-3 text-slate-700">{p.emoji} {p.title}</td>
-                        <td className="py-2 pr-3 font-medium text-slate-800">
-                          {t ? `${personName(ru!)} · ${label(t, intl)}` : '— вакансия —'}
-                        </td>
-                        <td className="py-2 pr-3">
-                          {t && (
-                            <span className={`rounded-md px-2 py-0.5 text-xs border ${quadraChip(t.quadra)}`}>
-                              {QUADRAS[t.quadra].name}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2 pr-3 text-slate-600">
-                          {cand ? `${field} · стаж ${cand.years} лет` : '—'}
-                        </td>
-                        <td className="py-2 pr-3">
-                          {cand ? `${fitStars(blended)} ${blended}% (проф ${prof} · соц ${soc})` : '—'}
-                        </td>
-                        <td className="py-2">
-                          {report.value
-                            ? cand
-                              ? <b className="text-emerald-700">{signedMoney(report.value.perPost.find((x) => x.post.id === p.id)?.contribution ?? 0)}</b>
-                              : <b className="text-rose-500">{signedMoney(-VACANCY_VALUE_PENALTY)}</b>
-                            : '—'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <h2 className="font-semibold text-slate-800 mb-2">Правила за 30 секунд</h2>
+            <ul className="text-sm text-slate-600 space-y-1.5">
+              <li>📅 <b>{LIVE_MONTHS} месяцев</b> — месяц закрывается кнопкой «Закрыть месяц», время уже не остановить.</li>
+              <li>🧑‍💼 Кандидаты приходят на рынок труда и <b>уходят в конце месяца</b> — решение нельзя откладывать навсегда.</li>
+              <li>💼 Приём на работу стоит <b>подъёмных ({SIGNING_BONUS_MONTHS} оклад)</b>, увольнение — <b>секверанса ({SEVERANCE_MONTHS} оклада)</b>; всё платится из кассы.</li>
+              <li>🕳 Пустое кресло <b>капает каждый месяц</b>: штраф кассе растёт со временем простоя, а стоимость компании теряет {fmtValue(VACANCY_VALUE_PENALTY)} за каждую вакансию.</li>
+              <li>🌤 Конъюнктура гуляет: спрос покупателей и рынок труда меняются каждый месяц — выручка то растёт, то проседает.</li>
+              <li>🏆 Финал: сколько миллионов гривен вы добавили к стоимости сети — это ваш счёт и рекорд.</li>
+            </ul>
           </section>
-
-          <div className="flex flex-wrap gap-3 justify-center">
-            <button
-              onClick={() => setPhase('governing')}
-              className="rounded-xl bg-slate-800 px-5 py-2.5 font-semibold text-white hover:bg-slate-700"
-            >
-              ← Вернуться в штаб
-            </button>
-            <button
-              onClick={startNewGame}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
-            >
-              🔄 Новый рынок
-            </button>
-          </div>
-        </main>
-        <Disclaimer />
-      </div>
-    )
-  }
-
-  // ============ ЭКРАН 2: СОБЕСЕДОВАНИЯ ============
-  if (phase === 'hiring') {
-    const filled = assigned.length
-    const hiringPayroll = payroll(team, pool)
-    const payrollOverPct = hiringPayroll > PAYROLL_BUDGET
-      ? Math.round((hiringPayroll / PAYROLL_BUDGET - 1) * 100)
-      : 0
-    return (
-      <div className="min-h-screen bg-slate-100 flex flex-col">
-        <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-8">
-          <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">🧑‍💼 Собеседования</h1>
-              <p className="text-slate-500 mt-1 text-sm sm:text-base">
-                Распределите кандидатов по 8 должностям: итоговый рейтинг = 65% профпригодность +
-                35% соционика. Пустое кресло — тоже вариант, но за него команда заплатит в кризисах.
-              </p>
-            </div>
-            {intlBtn}
-          </header>
-
-          <section aria-label="Пульс сети: стоимость компании" className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-5">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">💹 Пульс сети — стоимость компании</p>
-                <p className="mt-0.5 text-3xl sm:text-4xl font-black text-slate-800">{fmtValue(pulse.total)}</p>
-                <p className="mt-1 max-w-md text-xs leading-relaxed text-slate-400">
-                  база {fmtValue(pulse.base)} · команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
-                  {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
-                  {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
-                  <span className="block">каждое назначение меняет деньги сразу — смотрите вклад в карточках должностей</span>
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-                <span className="text-slate-600">Команда: <b className="text-slate-800">{filled}/{POSTS.length}</b></span>
-                <span className="text-slate-600">В запасе: <b className="text-slate-800">{bench.length}</b></span>
-                <span className="text-slate-600">Рынок: <b className="text-slate-800">{MARKET_MODES[mode].label}</b></span>
-                <span className="text-slate-600">
-                  ФОТ: <b className={payrollOverPct > 0 ? 'text-rose-600' : 'text-slate-800'}>{fmtMoney(hiringPayroll)}</b>
-                  <span className="text-slate-400"> из {fmtMoney(PAYROLL_BUDGET)}</span>
-                </span>
-                {payrollOverPct > 0 && (
-                  <span className="rounded-lg bg-rose-100 border border-rose-300 text-rose-700 px-2.5 py-1 text-xs font-medium">
-                    Перерасход ФОТ: +{payrollOverPct}% к бюджету
-                  </span>
-                )}
-                {vacantCount > 0 && (
-                  <span className="rounded-lg bg-amber-100 border border-amber-300 text-amber-700 px-2.5 py-1 text-xs font-medium">
-                    Внимание: {vacantCount === 1 ? 'должность останется пустой' : `${vacantCount} должностей останутся пустыми`}
-                  </span>
-                )}
-              </div>
-            </div>
-          </section>
-
-          <div className="grid gap-4 sm:grid-cols-2 mb-5">
-            {POSTS.map((post) => {
-              const ru = team[post.id]
-              const t = ru ? typeByRu(ru) : null
-              const cand = ru ? pool.find((c) => c.ru === ru) : null
-              const prof = cand ? profFit(cand, post) : 0
-              const soc = t ? postFit(t, post) : 0
-              const blended = cand ? overallFit(cand, post) : 0
-              const top = pool
-                .map((c) => ({ c, fit: overallFit(c, post) }))
-                .sort((a, b) => b.fit - a.fit)
-                .slice(0, 3)
-              return (
-                <article key={post.id} className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200">
-                  <h2 className="font-semibold text-slate-800 text-base sm:text-lg">
-                    <span aria-hidden>{post.emoji}</span> {post.title}
-                  </h2>
-                  <p className="text-sm text-slate-500 mt-0.5">{post.description}</p>
-                  <div className="flex flex-wrap gap-1.5 mt-2">
-                    {[post.primary, post.secondary].map((fn) => (
-                      <span key={fn}
-                        className="rounded-md bg-slate-100 border border-slate-200 px-2 py-0.5 text-xs text-slate-600"
-                        title={FUNCTIONS[fn].name}>
-                        {fn} · {FUNCTIONS[fn].name}
-                      </span>
-                    ))}
-                  </div>
-                  <select
-                    aria-label={`Назначить кандидата на должность «${post.title}»`}
-                    value={ru ?? ''}
-                    onChange={(e) => assign(post.id, e.target.value)}
-                    className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                  >
-                    <option value="">— вакансия —</option>
-                    {POSTS.map((fieldPost) => {
-                      const inField = pool
-                        .filter((c) => c.profession === fieldPost.id)
-                        .sort((a, b) => overallFit(b, post) - overallFit(a, post))
-                      if (inField.length === 0) return null
-                      return (
-                        <optgroup key={fieldPost.id} label={`Сфера «${fieldPost.field}»`}>
-                          {inField.map((candidate) => {
-                            const busy = usedTypes.has(candidate.ru) && candidate.ru !== ru
-                            return (
-                              <option key={candidate.ru} value={candidate.ru} disabled={busy}>
-                                {candidate.name} ({label(typeByRu(candidate.ru), intl)}) — итог {overallFit(candidate, post)}%{busy ? ' — нанят' : ''}
-                              </option>
-                            )
-                          })}
-                        </optgroup>
-                      )
-                    })}
-                  </select>
-                  {cand ? (
-                    <div className={`mt-2 inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2.5 py-1 text-sm ${fitBadgeClass(blended)}`}>
-                      <b>{fitStars(blended)}</b>
-                      <span>итог {blended}%</span>
-                      <span className="text-xs opacity-70">проф {prof}% · соционика {soc}%</span>
-                      <span className="text-xs font-semibold">· вклад {signedMoney(postContribution(blended, mode))}</span>
-                    </div>
-                  ) : (
-                    <div className="mt-2">
-                      <p className="text-xs font-medium text-rose-500">Вакансия бьёт по стоимости: {signedMoney(-VACANCY_VALUE_PENALTY)}</p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        Лучшие по итоговому рейтингу: {top.map((x) => `${x.c.name} ${x.fit}%`).join(' · ')}
-                      </p>
-                    </div>
-                  )}
-                </article>
-              )
-            })}
-          </div>
-
-          {bench.length > 0 && (
-            <section className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200 mb-5">
-              <h2 className="font-semibold text-slate-800 mb-2">Скамейка запасных ({bench.length})</h2>
-              <div className="flex flex-wrap gap-2">
-                {bench.map((c) => {
-                  const t = typeByRu(c.ru)
-                  const suggestion = bestPostForCandidate(c)
-                  const field = POSTS.find((p) => p.id === c.profession)?.field ?? c.profession
-                  return (
-                    <span key={c.ru}
-                      title={`${c.name}, ${c.age} лет · ${field}, стаж ${c.years} лет · «${c.achievement}» · тип ${label(t, intl)} — ${c.tagline}`}
-                      className={`rounded-lg border px-2.5 py-1 text-sm ${quadraChip(t.quadra)}`}>
-                      {c.name} → {suggestion.post.emoji} {suggestion.post.title} ({suggestion.fit}%)
-                    </span>
-                  )
-                })}
-              </div>
-            </section>
-          )}
 
           <div className="flex flex-wrap items-center gap-3">
             <button
-              onClick={goGoverning}
-              className="rounded-xl bg-emerald-600 px-5 py-2.5 font-semibold text-white shadow hover:bg-emerald-500"
+              onClick={acceptCompany}
+              className="rounded-xl bg-emerald-600 px-6 py-3 text-lg font-semibold text-white shadow hover:bg-emerald-500"
             >
-              Открыть офис → {filled}/{POSTS.length}
-            </button>
-            <button
-              onClick={autoHire}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
-            >
-              🤖 Подобрать автоматически
-            </button>
-            <button
-              onClick={clearHiring}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
-            >
-              🧹 Сбросить назначения
+              🏢 Принять сеть
             </button>
             {best && (
-              <span className="ml-auto text-sm text-slate-500">
-                Рекорд: <b>{best.overall}%</b> (ранг {best.rank}{best.value ? ` · ${fmtValue(best.value)}` : ''})
+              <span className="text-sm text-slate-500">
+                Рекорд сценария: <b>{fmtValue(best.value)}</b>{' '}
+                ({best.growth >= 0 ? '+' : '−'}{fmtValue(Math.abs(best.growth))} за год)
               </span>
             )}
           </div>
@@ -774,219 +278,492 @@ export default function BravoSimulator() {
     )
   }
 
-  // ============ ЭКРАН 3: ШТАБ СЕТИ (ГРАФ + КРИЗИСЫ) ============
-  const played = CRISES.filter((c) => results[c.id]).length
-  const hqPayroll = payroll(team, pool)
-  const hqPayrollOver = hqPayroll > PAYROLL_BUDGET
-    ? Math.round((hqPayroll / PAYROLL_BUDGET - 1) * 100)
-    : 0
+  const lastLog: MonthLog | null = game.history.length > 0 ? game.history[game.history.length - 1] : null
+
+  // ============ ЭКРАН 3: ОТЧЁТ ВЛАДЕЛЬЦУ (12 месяцев) ============
+  if (phase === 'final') {
+    const finalLog = game.history[game.history.length - 1]
+    const finalValue = finalLog.value
+    const growth = finalValue - game.startValue
+    const grade = liveGrade(growth)
+    const values = game.history.map((h) => h.value)
+    const minV = Math.min(...values, game.startValue)
+    const maxV = Math.max(...values, game.startValue)
+    const totalRevenue = game.history.reduce((a, h) => a + h.revenue, 0)
+    const totalPayroll = game.history.reduce((a, h) => a + h.payroll, 0)
+    const totalOpex = game.history.reduce((a, h) => a + h.opex, 0)
+    const totalFine = game.history.reduce((a, h) => a + h.vacancyFine, 0)
+    return (
+      <div className="min-h-screen bg-slate-100 flex flex-col">
+        <main className="flex-1 mx-auto w-full max-w-4xl px-4 py-8">
+          <div className="text-center mb-6">
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">🏁 Год закончен — отчёт владельцу</h1>
+            {isNewBest && (
+              <p className="mt-1 inline-block rounded-full bg-amber-100 border border-amber-300 px-3 py-0.5 text-sm font-semibold text-amber-700">
+                🏆 Новый рекорд сценария!
+              </p>
+            )}
+          </div>
+
+          <section className="rounded-3xl bg-white p-6 sm:p-8 shadow-sm border border-slate-200 text-center mb-5">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Стоимость компании</p>
+            <p className="mt-1 text-4xl sm:text-5xl font-black text-slate-800">{fmtValue(finalValue)}</p>
+            <p className={`mt-2 text-xl font-bold ${growth >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+              {signedMoney(growth)} за год
+            </p>
+            <p className="mt-1 text-slate-500">
+              <b className="text-slate-700">{grade.word}</b> — {grade.note}
+            </p>
+            {best && (
+              <p className="mt-2 text-sm text-slate-400">
+                Рекорд сценария: {fmtValue(best.value)} ({best.growth >= 0 ? '+' : '−'}{fmtValue(Math.abs(best.growth))})
+              </p>
+            )}
+          </section>
+
+          <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+            <h2 className="font-semibold text-slate-800 mb-1">История года: стоимость по месяцам</h2>
+            <p className="text-xs text-slate-400 mb-3">
+              столбики выше линии старта — компания дорожает, ниже — дешевеет
+            </p>
+            <div className="flex items-end gap-1.5 h-28">
+              {game.history.map((h, i) => {
+                const span = maxV - minV || 1
+                const pct = 15 + 85 * ((h.value - minV) / span)
+                const up = h.value >= game.startValue
+                return (
+                  <div
+                    key={i}
+                    className="flex-1 flex flex-col justify-end"
+                    title={`Месяц ${h.month}: ${fmtValue(h.value)} · ${DEMAND_MODES[h.demand].label}`}
+                  >
+                    <div className={`w-full rounded-t ${up ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ height: `${pct}%` }} />
+                  </div>
+                )
+              })}
+            </div>
+            <div className="flex gap-1.5 text-xs text-slate-400 mt-1">
+              {game.history.map((h, i) => (
+                <span key={i} className="flex-1 text-center">{h.month}</span>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+            <h2 className="font-semibold text-slate-800 mb-3">Куда утекали деньги за год</h2>
+            <div className="grid gap-3 sm:grid-cols-4 text-center">
+              <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3">
+                <p className="text-xs text-emerald-700">Выручка</p>
+                <p className="font-bold text-emerald-800">+{fmtValue(totalRevenue)}</p>
+              </div>
+              <div className="rounded-xl bg-rose-50 border border-rose-200 p-3">
+                <p className="text-xs text-rose-700">ФОТ</p>
+                <p className="font-bold text-rose-800">−{fmtValue(totalPayroll)}</p>
+              </div>
+              <div className="rounded-xl bg-rose-50 border border-rose-200 p-3">
+                <p className="text-xs text-rose-700">Операционные</p>
+                <p className="font-bold text-rose-800">−{fmtValue(totalOpex)}</p>
+              </div>
+              <div className={`rounded-xl border p-3 ${totalFine > 0 ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'}`}>
+                <p className="text-xs text-slate-500">Простои вакансий</p>
+                <p className={`font-bold ${totalFine > 0 ? 'text-rose-800' : 'text-slate-600'}`}>
+                  {totalFine > 0 ? `−${fmtValue(totalFine)}` : '0 грн'}
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section aria-label="Разбивка стоимости компании" className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-semibold text-slate-800">💹 Пульс сети — из чего сложилась цена</h2>
+              <p className="text-2xl font-black text-slate-800">{fmtValue(pulse.total)}</p>
+            </div>
+            <ul className="mt-3 divide-y divide-slate-100">
+              {pulse.parts.map((part) => (
+                <li key={part.label} className="flex items-baseline justify-between gap-3 py-1.5 text-sm">
+                  <span className="text-slate-600">
+                    {part.label}
+                    {part.hint && <span className="text-slate-400"> · {part.hint}</span>}
+                  </span>
+                  <b className={part.label === 'База сети' ? 'text-slate-800' : part.amount < 0 ? 'text-rose-600' : 'text-emerald-700'}>
+                    {part.label === 'База сети' ? fmtValue(part.amount) : signedMoney(part.amount)}
+                  </b>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-6">
+            <h2 className="font-semibold text-slate-800 mb-3">Состав команды на конец года</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 border-b border-slate-200">
+                    <th className="py-2 pr-3 font-medium">Должность</th>
+                    <th className="py-2 pr-3 font-medium">Человек</th>
+                    <th className="py-2 pr-3 font-medium">Зарплата</th>
+                    <th className="py-2 pr-3 font-medium">Итог</th>
+                    <th className="py-2 font-medium">Вклад в стоимость</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {POSTS.map((p) => {
+                    const s = game.slots[p.id]
+                    const ru = s?.ru ?? null
+                    const emp = ru ? game.roster.find((c) => c.ru === ru) ?? null : null
+                    const t = ru ? typeByRu(ru) : null
+                    const fit = emp ? overallFit(emp, p) : 0
+                    const contrib = pulse.perPost.find((x) => x.post.id === p.id)?.contribution ?? 0
+                    return (
+                      <tr key={p.id} className="border-b border-slate-100 last:border-0">
+                        <td className="py-2 pr-3 text-slate-700">{p.emoji} {p.title}</td>
+                        <td className="py-2 pr-3 font-medium text-slate-800">
+                          {emp && t ? `${emp.name} · ${label(t, intl)}` : '— вакансия —'}
+                        </td>
+                        <td className="py-2 pr-3 text-slate-600">{emp ? `${fmtMoney(emp.salary)}/мес` : '—'}</td>
+                        <td className="py-2 pr-3 text-slate-600">
+                          {emp ? `${fitStars(fit)} ${fit}% (проф ${profFit(emp, p)} · соц ${t ? postFit(t, p) : 0})` : '—'}
+                        </td>
+                        <td className="py-2">
+                          {emp
+                            ? <b className="text-emerald-700">{signedMoney(contrib)}</b>
+                            : <b className="text-rose-500">{signedMoney(-VACANCY_VALUE_PENALTY)}</b>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <div className="flex flex-wrap gap-3 justify-center pb-2">
+            <button
+              onClick={() => setPhase('manage')}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
+            >
+              ← Посмотреть штат
+            </button>
+            <button
+              onClick={acceptCompany}
+              className="rounded-xl bg-emerald-600 px-5 py-2.5 font-semibold text-white shadow hover:bg-emerald-500"
+            >
+              🔄 Новая компания
+            </button>
+          </div>
+        </main>
+        <Disclaimer />
+      </div>
+    )
+  }
+
+  // ============ ЭКРАН 2: ШТАБ СЕТИ — МЕСЯЦ ЗА МЕСЯЦЕМ ============
+  const filled = POSTS.filter((p) => game.slots[p.id].ru).length
+  const growthNow = pulse.total - game.startValue
+  const payrollOver = pay > PAYROLL_BUDGET ? Math.round((pay / PAYROLL_BUDGET - 1) * 100) : 0
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
       <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-8">
-        <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-800">🏪 Штаб сети «Браво»</h1>
+        <header className="mb-5 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-800">
+              🏪 Штаб сети — месяц {game.month} из {LIVE_MONTHS}
+            </h1>
+            <p className="text-sm text-slate-500">
+              Сценарий «Компания как есть» · решения можно принимать в любой момент месяца
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             {intlBtn}
             <button
-              onClick={() => setPhase('hiring')}
+              onClick={() => {
+                if (confirm('Начать новую компанию? Текущий прогресс сотрётся.')) acceptCompany()
+              }}
               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
-              ← Изменить состав
+              🔄 Новая компания
             </button>
           </div>
         </header>
 
-        {/* Полоска команды */}
-        <section className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-4">
-          <div className="flex flex-wrap gap-2">
-            {POSTS.map((p) => {
-              const t = team[p.id] ? typeByRu(team[p.id]!) : null
+        {/* Конъюнктура месяца */}
+        <section className="grid gap-3 sm:grid-cols-3 mb-4">
+          <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200" title={DEMAND_MODES[game.demand].hint}>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Спрос покупателей</p>
+            <p className="mt-0.5 font-semibold text-slate-800">
+              <span aria-hidden>{DEMAND_MODES[game.demand].emoji}</span> {DEMAND_MODES[game.demand].label}
+            </p>
+            <p className="text-xs text-slate-400 mt-1">{DEMAND_MODES[game.demand].hint}</p>
+          </div>
+          <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200" title={MARKET_MODES[game.labor].hint}>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Рынок труда</p>
+            <p className="mt-0.5 font-semibold text-slate-800">
+              <span aria-hidden>{MARKET_MODES[game.labor].emoji}</span> {MARKET_MODES[game.labor].label}
+            </p>
+            <p className="text-xs text-slate-400 mt-1">{MARKET_MODES[game.labor].hint}</p>
+          </div>
+          <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">💵 Касса</p>
+            <p className="mt-0.5 font-semibold text-slate-800">{fmtMoney(game.cash)}</p>
+            <p className="text-xs text-slate-400 mt-1">подъёмные, секверансы и простой платятся из неё</p>
+          </div>
+        </section>
+
+        {/* Пульс сети */}
+        <section aria-label="Пульс сети: стоимость компании" className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-4">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">💹 Пульс сети — стоимость компании</p>
+              <p className="mt-0.5 text-3xl sm:text-4xl font-black text-slate-800">{fmtValue(pulse.total)}</p>
+              <p className={`mt-1 text-sm font-semibold ${growthNow >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+                с приёмки: {signedMoney(growthNow)}
+                <span className="font-normal text-slate-400"> (приняли за {fmtValue(game.startValue)})</span>
+              </p>
+              <p className="mt-1 max-w-md text-xs leading-relaxed text-slate-400">
+                команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
+                {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
+                {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
+              </p>
+            </div>
+            <div className="text-sm space-y-1">
+              <p className="text-slate-600">Ожидаемая выручка месяца: <b className="text-slate-800">{fmtMoney(rev)}</b></p>
+              <p className="text-slate-600">
+                ФОТ: <b className={payrollOver > 0 ? 'text-rose-600' : 'text-slate-800'}>{fmtMoney(pay)}</b>
+                <span className="text-slate-400"> из {fmtMoney(PAYROLL_BUDGET)}</span>
+                {payrollOver > 0 && <span className="text-rose-600"> (+{payrollOver}%)</span>}
+              </p>
+              <p className="text-slate-600">
+                Простой вакансий: <b className={fine > 0 ? 'text-rose-600' : 'text-slate-800'}>{fine > 0 ? `−${fmtMoney(fine)}/мес` : '—'}</b>
+              </p>
+              <p className="text-slate-600">Сплочённость: <b className="text-slate-800">{coh}%</b></p>
+            </div>
+          </div>
+        </section>
+
+        {/* Последнее кадровое решение */}
+        {note && (
+          <div
+            className={`rounded-xl border px-4 py-2.5 mb-4 text-sm ${
+              note.kind === 'good'
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                : note.kind === 'bad'
+                  ? 'bg-rose-50 border-rose-300 text-rose-800'
+                  : 'bg-slate-50 border-slate-300 text-slate-700'
+            }`}
+            role="status"
+          >
+            {note.text}
+          </div>
+        )}
+
+        {/* Штат сети */}
+        <h2 className="font-semibold text-slate-800 mb-3 px-1">Штат сети ({filled}/{POSTS.length})</h2>
+        <div className="grid gap-3 sm:grid-cols-2 mb-5">
+          {POSTS.map((post) => {
+            const s = game.slots[post.id]
+            const ru = s?.ru ?? null
+            const emp = ru ? game.roster.find((c) => c.ru === ru) ?? null : null
+            const t = ru ? typeByRu(ru) : null
+            const prof = emp ? profFit(emp, post) : 0
+            const soc = t ? postFit(t, post) : 0
+            const fit = emp ? overallFit(emp, post) : 0
+            if (!emp || !t) {
               return (
-                <span key={p.id}
-                  className={`rounded-lg border px-2.5 py-1 text-sm ${t ? quadraChip(t.quadra) : 'border-slate-200 bg-slate-50 text-slate-400'}`}>
-                  {p.emoji} {t ? label(t, intl) : 'вакансия'}
-                </span>
+                <article key={post.id} className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border-2 border-rose-300">
+                  <h3 className="font-semibold text-slate-800 text-base sm:text-lg">
+                    <span aria-hidden>{post.emoji}</span> {post.title}
+                  </h3>
+                  <p className="mt-1 font-bold text-rose-600">— ВАКАНСИЯ —</p>
+                  <p className="text-sm text-slate-600 mt-1">
+                    Простой: <b>{s?.vacantMonths ?? 0} мес</b> · кассе{' '}
+                    <b className="text-rose-600">−{fmtMoney(vacancyFineFor(s?.vacantMonths ?? 0))}/мес</b>
+                  </p>
+                  <p className="text-sm text-slate-600">
+                    Стоимости компании: <b className="text-rose-500">{signedMoney(-VACANCY_VALUE_PENALTY)}</b>
+                  </p>
+                  <p className="text-xs text-slate-400 mt-2">
+                    Кандидатов ищите на рынке труда ниже — они уходят в конце месяца
+                  </p>
+                </article>
               )
-            })}
-          </div>
-          <p className={`mt-2 text-xs ${hqPayrollOver > 0 ? 'font-medium text-rose-600' : 'text-slate-500'}`}>
-            ФОТ команды: {fmtMoney(hqPayroll)} из бюджета {fmtMoney(PAYROLL_BUDGET)}/мес
-            {hqPayrollOver > 0 && <> — перерасход +{hqPayrollOver}%</>}
-          </p>
-          <p className="mt-1 text-sm text-slate-700">
-            💹 Стоимость компании: <b>{fmtValue(pulse.total)}</b>
-            <span className="text-slate-400">
-              {' '}· команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
-              {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
-              {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
-            </span>
-          </p>
-        </section>
-        <section className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-4">
-          <h2 className="font-semibold text-slate-800 mb-1">Карта отношений</h2>
-          <p className="text-sm text-slate-500 mb-3">Нажмите на линию между менеджерами, чтобы узнать тип отношений.</p>
-          <div className="grid gap-4 lg:grid-cols-[1fr_260px] items-start">
-            <div className="w-full max-w-[560px] mx-auto">
-              <svg viewBox="0 0 680 680" className="w-full h-auto" role="img" aria-label="Граф отношений между менеджерами сети">
-                {graph.edges.map((e, idx) => {
-                  const a = graph.nodes[e.i]
-                  const b = graph.nodes[e.j]
-                  const selected = selectedPair && (
-                    (team[POSTS[e.i].id] === selectedPair[0] && team[POSTS[e.j].id] === selectedPair[1]) ||
-                    (team[POSTS[e.i].id] === selectedPair[1] && team[POSTS[e.j].id] === selectedPair[0])
-                  )
-                  const color = CATEGORY_COLORS[e.category as keyof typeof CATEGORY_COLORS]
-                  return (
-                    <g key={idx}>
-                      <line
-                        x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                        stroke={color}
-                        strokeWidth={selected ? 5 : 1.6 + Math.abs(e.score) * 0.9}
-                        strokeOpacity={selected ? 1 : 0.55}
-                        strokeDasharray={e.category === 'tense' ? '7 5' : undefined}
-                      />
-                      <line
-                        x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                        stroke="transparent"
-                        strokeWidth={16}
-                        className="cursor-pointer"
-                        onClick={() => setSelectedPair([team[POSTS[e.i].id]!, team[POSTS[e.j].id]!])}
-                      >
-                        <title>{`${relationBetween(typeByRu(team[POSTS[e.i].id]!), typeByRu(team[POSTS[e.j].id]!)).kind}`}</title>
-                      </line>
-                    </g>
-                  )
-                })}
-                {graph.nodes.map(({ post, x, y }) => {
-                  const t = team[post.id] ? typeByRu(team[post.id]!) : null
-                  const colors = t ? QUADRA_COLORS[t.quadra] : { stroke: '#cbd5e1', fill: '#f8fafc', text: '#94a3b8' }
-                  return (
-                    <g key={post.id}>
-                      <circle cx={x} cy={y} r={38} fill={colors.fill} stroke={colors.stroke} strokeWidth={2.5} />
-                      <text x={x} y={y - 2} textAnchor="middle" fontSize={20} aria-hidden>{post.emoji}</text>
-                      <text x={x} y={y + 18} textAnchor="middle" fontSize={14} fontWeight={700} fill={colors.text}>
-                        {t ? (intl ? t.intl : t.ru) : 'вак.'}
-                      </text>
-                    </g>
-                  )
-                })}
-              </svg>
-            </div>
-
-            <div className="space-y-3">
-              <div className="rounded-xl border border-slate-200 p-3 text-sm space-y-1.5">
-                <LegendRow color={CATEGORY_COLORS.comfy} label="Комфортные" count={pairStats.comfy} />
-                <LegendRow color={CATEGORY_COLORS.neutral} label="Нейтральные" count={pairStats.neutral} />
-                <LegendRow color={CATEGORY_COLORS.tense} label="Напряжённые" count={pairStats.tense} dashed />
-              </div>
-              <div className="rounded-xl border border-slate-200 p-3">
-                <p className="text-sm font-medium text-slate-700">Сплочённость команды</p>
-                <div className="mt-2 h-3 w-full rounded-full bg-slate-200 overflow-hidden">
-                  <div className="h-full rounded-full bg-emerald-500" style={{ width: `${cohesionValue}%` }} />
-                </div>
-                <p className="mt-1 text-sm text-slate-500"><b>{cohesionValue}%</b> из 100</p>
-              </div>
-            </div>
-          </div>
-
-          {selectedRel && (
-            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex flex-wrap items-center gap-2 mb-2">
-                <span className="font-semibold text-slate-800">{selectedRel.postA.emoji} {label(selectedRel.a, intl)}</span>
-                <span className="text-slate-400">↔</span>
-                <span className="font-semibold text-slate-800">{selectedRel.postB.emoji} {label(selectedRel.b, intl)}</span>
-                <span className={`rounded-md px-2 py-0.5 text-xs font-semibold text-white ${selectedRel.rel.kind === 'дуальность' || selectedRel.rel.kind === 'активация' ? 'bg-emerald-500' : RELATION_CATEGORY[selectedRel.rel.kind] === 'tense' ? 'bg-rose-500' : 'bg-amber-500'}`}>
-                  {selectedRel.rel.kind}
-                </span>
-              </div>
-              {selectedRel.rel.roleA && (
-                <p className="text-sm text-slate-500 mb-1">
-                  {label(selectedRel.a, intl)} — <b>{selectedRel.rel.roleA}</b>, {label(selectedRel.b, intl)} — <b>{selectedRel.rel.roleB}</b>
-                </p>
-              )}
-              <p className="text-sm text-slate-600">{RELATION_INFO_14[selectedRel.rel.kind]}</p>
-            </div>
-          )}
-        </section>
-
-        {/* Кризисы */}
-        <h2 className="font-semibold text-slate-800 mb-3 px-1">Бизнес-кризисы ({played}/{CRISES.length})</h2>
-        <div className="grid gap-4 sm:grid-cols-2 mb-6">
-          {CRISES.map((crisis) => {
-            const res = results[crisis.id]
+            }
+            const field = POSTS.find((f) => f.id === emp.profession)?.field ?? emp.profession
             return (
-              <article key={crisis.id} className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200 flex flex-col">
+              <article key={post.id} className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200">
                 <h3 className="font-semibold text-slate-800 text-base sm:text-lg">
-                  <span aria-hidden>{crisis.emoji}</span> {crisis.title}
+                  <span aria-hidden>{post.emoji}</span> {post.title}
                 </h3>
-                <p className="text-sm text-slate-500 mt-1 flex-1">{crisis.description}</p>
-                <div className="flex flex-wrap gap-1.5 mt-3">
-                  {crisis.involved.map((id) => {
-                    const p = POSTS.find((x) => x.id === id)!
-                    const t = team[id] ? typeByRu(team[id]!) : null
-                    return (
-                      <span key={id} className={`rounded-md px-2 py-0.5 text-xs border ${t ? quadraChip(t.quadra) : 'border-slate-200 bg-slate-50 text-slate-400'}`}>
-                        {p.emoji} {t ? (intl ? t.intl : t.ru) : 'вакансия'}
-                      </span>
-                    )
-                  })}
+                <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                  <p className="font-medium text-slate-800">{emp.name}</p>
+                  <span className={`rounded-md px-2 py-0.5 text-xs border ${quadraChip(t.quadra)}`}>
+                    {label(t, intl)}
+                  </span>
                 </div>
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {(Object.entries(crisis.demands) as [keyof typeof FUNCTIONS, number][]).map(([fn, w]) => (
-                    <span key={fn} className="rounded-md bg-slate-100 border border-slate-200 px-2 py-0.5 text-xs text-slate-600">
-                      {fn} ×{w}
-                    </span>
-                  ))}
+                <p className="text-xs text-slate-500">{emp.tagline}</p>
+                <p className="text-sm text-slate-600 mt-2">
+                  {field} · стаж {emp.years} лет · {emp.education}
+                </p>
+                <p className="text-sm text-slate-600">
+                  Зарплата: <b>{fmtMoney(emp.salary)}/мес</b>
+                  <span className="text-slate-400"> · «{emp.achievement}»</span>
+                </p>
+                <div className={`mt-2 inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2.5 py-1 text-sm ${fitBadgeClass(fit)}`}>
+                  <b>{fitStars(fit)}</b>
+                  <span>итог {fit}%</span>
+                  <span className="text-xs opacity-70">проф {prof}% · соционика {soc}%</span>
                 </div>
-                {res ? (
-                  <div className="mt-4">
-                    <div className="flex items-baseline justify-between">
-                      <p className="text-2xl font-bold text-slate-800">{res.score}%</p>
-                      <p className="text-xs text-slate-400">
-                        {res.relationPenalty !== 0 && `отношения: ${res.relationPenalty > 0 ? '+' : ''}${res.relationPenalty} `}
-                        {res.emptyPenalty > 0 && `вакансии: −${res.emptyPenalty}`}
-                      </p>
-                    </div>
-                    <div className="mt-1 h-2.5 w-full rounded-full bg-slate-200 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${res.score >= 80 ? 'bg-emerald-500' : res.score >= 60 ? 'bg-sky-500' : res.score >= 40 ? 'bg-amber-500' : 'bg-rose-500'}`}
-                        style={{ width: `${res.score}%` }}
-                      />
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600">{res.narrative}</p>
-                    <ul className="mt-2 space-y-1">
-                      {res.contributions.slice(0, 4).map((c, i) => (
-                        <li key={i} className="text-xs text-slate-500">
-                          <b className="text-slate-700">{c.postTitle}</b> · {label(c.type, intl)}:{' '}
-                          {FUNCTIONS[c.fn].name} — {c.position}-я функция · проф {c.prof}%
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => playCrisis(crisis.id)}
-                    className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                    onClick={() => doFire(post.id)}
+                    title={`Выплата ${SEVERANCE_MONTHS} окладов: ${fmtMoney(emp.salary * SEVERANCE_MONTHS)}`}
+                    className="rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-sm font-medium text-rose-600 hover:bg-rose-50"
                   >
-                    ⚡ Решить вопрос
+                    Уволить (−{fmtMoney(emp.salary * SEVERANCE_MONTHS)})
                   </button>
-                )}
+                  <span className="text-xs text-slate-400">замену ищите на рынке труда</span>
+                </div>
               </article>
             )
           })}
         </div>
 
+        {/* Рынок труда месяца */}
+        <h2 className="font-semibold text-slate-800 mb-1 px-1">🧑‍💼 Рынок труда ({game.bench.length})</h2>
+        <p className="text-sm text-slate-500 mb-3 px-1">
+          Эти люди уйдут при закрытии месяца. Выберите должность: свободную — или с заменой
+          (придётся заплатить и подъёмные, и секверанс).
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 mb-5">
+          {game.bench.map((ru) => {
+            const c: Candidate | undefined = game.roster.find((x) => x.ru === ru)
+            if (!c) return null
+            const t = typeByRu(c.ru)
+            const field = POSTS.find((p) => p.id === c.profession)?.field ?? c.profession
+            const selPost = sel && sel.ru === c.ru ? POSTS.find((p) => p.id === sel.postId) ?? null : null
+            const plan: HireCost | null = selPost ? hireCost(game, c.ru, selPost.id) : null
+            const fit = selPost ? overallFit(c, selPost) : 0
+            return (
+              <article key={ru} className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 flex flex-col">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold text-slate-800">{c.name}</p>
+                  <span className={`rounded-md px-2 py-0.5 text-xs border ${quadraChip(t.quadra)}`}>
+                    {label(t, intl)}
+                  </span>
+                  <span className="text-xs text-slate-400">{c.age} лет</span>
+                </div>
+                <p className="text-xs text-slate-500">{c.tagline}</p>
+                <p className="text-sm font-medium text-slate-700 mt-2">
+                  {field} · стаж {c.years} лет
+                </p>
+                <p className="text-xs text-slate-500">Образование: {c.education}</p>
+                <p className="text-sm text-slate-600 mt-1.5">«{c.achievement}»</p>
+                <p className="text-sm font-semibold text-emerald-700 mt-1.5">
+                  от {fmtMoney(c.salary)}/мес
+                </p>
+                <select
+                  aria-label={`Должность для ${c.name}`}
+                  value={sel && sel.ru === c.ru ? sel.postId : ''}
+                  onChange={(e) => {
+                    const postId = e.target.value
+                    setSel(postId ? { ru: c.ru, postId } : null)
+                  }}
+                  className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                >
+                  <option value="">— куда определить? —</option>
+                  {POSTS.map((p) => {
+                    const occupied = !!game.slots[p.id].ru
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.emoji} {p.title} · {occupied ? 'замена' : 'вакансия'}
+                      </option>
+                    )
+                  })}
+                </select>
+                {selPost && plan && (
+                  <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-sm">
+                    <div className={`inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2.5 py-1 ${fitBadgeClass(fit)}`}>
+                      <b>{fitStars(fit)}</b>
+                      <span>итог {fit}%</span>
+                      <span className="text-xs opacity-70">
+                        проф {profFit(c, selPost)}% · соционика {postFit(t, selPost)}%
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-slate-600">
+                      Подъёмные: <b>{fmtMoney(plan.bonus)}</b>
+                      {plan.replacing && <> · секверанс: <b>{fmtMoney(plan.severance)}</b></>}
+                      {' '}· всего из кассы: <b className="text-slate-800">{fmtMoney(plan.total)}</b>
+                    </p>
+                    {plan.ok ? (
+                      <button
+                        onClick={() => doHire(c.ru, selPost.id)}
+                        className="mt-2 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+                      >
+                        Предложить работу →
+                      </button>
+                    ) : (
+                      <p className="mt-2 text-sm font-medium text-rose-600">{plan.reason}</p>
+                    )}
+                  </div>
+                )}
+              </article>
+            )
+          })}
+        </div>
+        {game.bench.length === 0 && (
+          <p className="text-sm text-slate-400 mb-5 px-1">На рынке никого нет — закрывайте месяц, придут новые люди.</p>
+        )}
+
+        {/* Итоги прошлого месяца */}
+        {lastLog && (
+          <section className="rounded-2xl bg-white p-4 sm:p-5 shadow-sm border border-slate-200 mb-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-semibold text-slate-800">📊 Итоги месяца {lastLog.month}</h2>
+              <p className="text-sm text-slate-500">
+                <span aria-hidden>{DEMAND_MODES[lastLog.demand].emoji}</span> {DEMAND_MODES[lastLog.demand].label}
+              </p>
+            </div>
+            <div className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+              <p className="text-slate-600">Выручка: <b className="text-emerald-700">+{fmtMoney(lastLog.revenue)}</b></p>
+              <p className="text-slate-600">ФОТ: <b className="text-rose-600">−{fmtMoney(lastLog.payroll)}</b></p>
+              <p className="text-slate-600">Операционные: <b className="text-rose-600">−{fmtMoney(lastLog.opex)}</b></p>
+              {lastLog.vacancyFine > 0 && (
+                <p className="text-slate-600">Простой вакансий: <b className="text-rose-600">−{fmtMoney(lastLog.vacancyFine)}</b></p>
+              )}
+              <p className="text-slate-600">
+                Итог кассы: <b className={lastLog.net >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
+                  {lastLog.net >= 0 ? '+' : '−'}{fmtMoney(Math.abs(lastLog.net))}
+                </b>
+              </p>
+              <p className="text-slate-600">
+                Стоимость: <b className={lastLog.valueDelta >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
+                  {signedMoney(lastLog.valueDelta)}
+                </b>{' '}→ {fmtValue(lastLog.value)}
+              </p>
+            </div>
+            <ul className="mt-2 space-y-1 text-sm">
+              {lastLog.events.map((e, i) => (
+                <li
+                  key={i}
+                  className={e.kind === 'good' ? 'text-emerald-700' : e.kind === 'bad' ? 'text-rose-600' : 'text-slate-500'}
+                >
+                  • {e.text}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* Действие месяца */}
         <div className="flex flex-wrap items-center gap-3 pb-2">
           <button
-            onClick={finishReport}
-            disabled={played === 0}
-            className="rounded-xl bg-slate-800 px-5 py-2.5 font-semibold text-white hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={doClose}
+            className="rounded-xl bg-slate-800 px-5 py-2.5 font-semibold text-white shadow hover:bg-slate-700"
           >
-            📋 Итоговый отчёт ({played}/{CRISES.length})
+            {game.month >= LIVE_MONTHS ? '🏁 Закрыть год и сдать отчёт' : `▶ Закрыть месяц ${game.month} →`}
           </button>
-          {played < CRISES.length && (
-            <span className="text-sm text-slate-500">Отыграйте хотя бы один кризис</span>
-          )}
+          <span className="text-sm text-slate-500">
+            не наняли — кандидаты уйдут · вакансии подорожают
+          </span>
         </div>
       </main>
       <Disclaimer />
@@ -999,30 +776,6 @@ export default function BravoSimulator() {
 function quadraChip(q: QuadraId): string {
   const c = QUADRA_COLORS[q]
   return `${c.fill} ${c.text} border-slate-200`
-}
-
-function Bar({ title, value, hint, color }: { title: string; value: number; hint: string; color: string }) {
-  return (
-    <div>
-      <p className="text-sm font-medium text-slate-700">{title}</p>
-      <div className="mt-1.5 h-2.5 w-full rounded-full bg-slate-200 overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${value}%` }} />
-      </div>
-      <p className="mt-1 text-xs text-slate-400">{value}% · {hint}</p>
-    </div>
-  )
-}
-
-function LegendRow({ color, label, count, dashed }: { color: string; label: string; count: number; dashed?: boolean }) {
-  return (
-    <div className="flex items-center gap-2">
-      <svg width="30" height="8" aria-hidden>
-        <line x1="0" y1="4" x2="30" y2="4" stroke={color} strokeWidth="3" strokeDasharray={dashed ? '5 4' : undefined} />
-      </svg>
-      <span className="text-slate-600">{label}</span>
-      <span className="ml-auto font-semibold text-slate-800">{count}</span>
-    </div>
-  )
 }
 
 function Disclaimer() {
