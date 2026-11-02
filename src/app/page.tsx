@@ -27,9 +27,9 @@ import {
   hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
   teamVsIdeal, idealCompare,
   companyProfile, assignPreview, promoteEmployee, promoteCost,
-  PROMO_GRACE_MONTHS, FUNCTIONS,
+  PROMO_GRACE_MONTHS, FUNCTIONS, CRISIS_BASELINE,
   type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
-  type MarketMode, type Candidate,
+  type MarketMode, type Candidate, type CrisisLog,
   type IdealState, type SlotState, type IdealCompare, type IdealLinePoint,
   type PromotionRequest, type AssignmentPreview, type CompanyProfile,
 } from '@/lib/bravo'
@@ -113,7 +113,8 @@ function restoreIdeal(parsed: Partial<LiveGame>): IdealState | null {
       .map((h) => ({ month: Number(h.month), value: Number(h.value) }))
     : []
   const moves = Array.isArray(i.moves) ? i.moves.filter((m): m is string => typeof m === 'string') : []
-  return { cash, slots, roster, history, moves }
+  const valueShift = Number.isFinite(Number(i.valueShift)) ? Number(i.valueShift) : 0
+  return { cash, slots, roster, history, moves, valueShift }
 }
 
 /** Восстановление партии из сохранения: битые данные отбрасываем */
@@ -169,7 +170,10 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
     const promotionsDone = Number.isFinite(Number(parsed.promotionsDone))
       ? Math.max(0, Math.floor(Number(parsed.promotionsDone)))
       : 0
-    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal, promotions, promotionsDone }
+    // Кризисы (2.4): в старых сохранениях репутации нет — считаем, что кризисов не было
+    const valueShift = Number.isFinite(Number(parsed.valueShift)) ? Number(parsed.valueShift) : 0
+    const lastCrisis = typeof parsed.lastCrisis === 'string' ? parsed.lastCrisis : null
+    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal, promotions, promotionsDone, valueShift, lastCrisis }
   } catch {
     return null
   }
@@ -365,6 +369,10 @@ export default function BravoSimulator() {
         text: 'Сильные люди растут: сотрудник может попросить большее кресло. Повысите — его старое кресло опустеет: вакансия рождается и из повышения! Проигнорируете два месяца — человек уйдёт к конкурентам.',
       },
       {
+        emoji: '🌪', title: 'Кризисы каждый месяц',
+        text: 'Мир не ждёт: сорванная поставка, проверка, вставшие кассы приходят сами. Исход решает команда — тип × квалификация × должность × кризис: у каждого испытания свои функции и свои кресла. Справитесь — премия кассе и стоимости, провал — ущерб. Провал в одном кризисе — выигрыш в другом, и кризис гнёт даже линию идеала.',
+      },
+      {
         emoji: '⏱', title: 'Скорость моделирования',
         text: 'Не ждите месяц за месяцем по кнопке: включите автопилот 🐢/▶/⏩ — месяцы закроются сами. Пауза — чтобы думать; выбор кандидата ставит автопилот на паузу.',
       },
@@ -420,6 +428,7 @@ export default function BravoSimulator() {
               <li>🥇 Линия идеального управления: теневой управляющий играет те же условия без ошибок — его линия растёт на графике рядом с вашей.</li>
               <li>🦸 Раз в несколько месяцев на рынок может выйти суперуправленец — эталон во плоти, но в 1,45 раза дороже рынка.</li>
               <li>⏱ Автопилот закрывает месяцы сам: год проматывается за полминуты, пауза — чтобы думать.</li>
+              <li>🌪 Кризисы приходят сами: исход = тип × квалификация × должность × кризис. Справились выше порога — премия, ниже — ущерб кассе и стоимости; кризис гнёт и линию идеала.</li>
               <li>🏆 Финал: сколько миллионов гривен вы добавили к стоимости сети — это ваш счёт и рекорд.</li>
             </ul>
           </section>
@@ -453,6 +462,7 @@ export default function BravoSimulator() {
   }
 
   const lastLog: MonthLog | null = game.history.length > 0 ? game.history[game.history.length - 1] : null
+  const crisisMonths = game.history.filter((h) => h.crisis).map((h) => h.month)
 
   // ============ ЭКРАН 3: ОТЧЁТ ВЛАДЕЛЬЦУ (12 месяцев) ============
   if (phase === 'final') {
@@ -467,6 +477,11 @@ export default function BravoSimulator() {
     }).length
     const values = game.history.map((h) => h.value)
     const finalCmp = idealCompare(game)
+    const crisisLogs = game.history.map((h) => h.crisis).filter((c): c is CrisisLog => !!c)
+    const crisisBest = crisisLogs.length > 0 ? crisisLogs.reduce((a, b) => (b.score > a.score ? b : a)) : null
+    const crisisWorst = crisisLogs.length > 0 ? crisisLogs.reduce((a, b) => (b.score < a.score ? b : a)) : null
+    const crisisCashSum = crisisLogs.reduce((a, c) => a + c.cashImpact, 0)
+    const crisisValueSum = crisisLogs.reduce((a, c) => a + c.valueImpact, 0)
     const minV = Math.min(...values, game.startValue)
     const maxV = Math.max(...values, game.startValue)
     const totalRevenue = game.history.reduce((a, h) => a + h.revenue, 0)
@@ -520,8 +535,9 @@ export default function BravoSimulator() {
                   <div
                     key={i}
                     className="flex-1 flex flex-col justify-end"
-                    title={`Месяц ${h.month}: ${fmtValue(h.value)} · ${DEMAND_MODES[h.demand].label}`}
+                    title={`Месяц ${h.month}: ${fmtValue(h.value)} · ${DEMAND_MODES[h.demand].label}${h.crisis ? ` · 🌪 ${h.crisis.title}: ${h.crisis.score}%` : ''}`}
                   >
+                    {h.crisis && <span className="mb-0.5 text-center text-[10px] leading-none">🌪</span>}
                     <div className={`w-full rounded-t ${up ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ height: `${pct}%` }} />
                   </div>
                 )
@@ -533,6 +549,50 @@ export default function BravoSimulator() {
               ))}
             </div>
           </section>
+
+          {/* Кризисы года: что пережито и чем это обошлось */}
+          {crisisLogs.length > 0 && (
+            <section aria-label="Кризисы года" className="rounded-2xl bg-white p-4 sm:p-6 shadow-sm border border-slate-200 mb-5">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="font-semibold text-slate-800">🌪 Кризисы года: пережито {crisisLogs.length}</h2>
+                <p className="text-sm text-slate-500">
+                  средний балл{' '}
+                  <b className="text-slate-700">{Math.round(crisisLogs.reduce((a, c) => a + c.score, 0) / crisisLogs.length)}%</b>
+                  {' '}против идеала{' '}
+                  <b className="text-slate-700">{Math.round(crisisLogs.reduce((a, c) => a + c.idealScore, 0) / crisisLogs.length)}%</b>
+                </p>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3 text-center">
+                {crisisBest && (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3">
+                    <p className="text-xs text-emerald-700">Лучший кризис</p>
+                    <p className="font-bold text-emerald-800"><span aria-hidden>{crisisBest.emoji}</span> {crisisBest.title}</p>
+                    <p className="text-xs text-emerald-700">{crisisBest.score}% против {crisisBest.idealScore}% у идеала</p>
+                  </div>
+                )}
+                {crisisWorst && (
+                  <div className="rounded-xl bg-rose-50 border border-rose-200 p-3">
+                    <p className="text-xs text-rose-700">Худший кризис</p>
+                    <p className="font-bold text-rose-800"><span aria-hidden>{crisisWorst.emoji}</span> {crisisWorst.title}</p>
+                    <p className="text-xs text-rose-700">{crisisWorst.score}% против {crisisWorst.idealScore}% у идеала</p>
+                  </div>
+                )}
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+                  <p className="text-xs text-slate-500">Последствия за год</p>
+                  <p className={`font-bold ${crisisCashSum >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    касса {crisisCashSum >= 0 ? '+' : '−'}{fmtValue(Math.abs(crisisCashSum))}
+                  </p>
+                  <p className={`text-xs ${crisisValueSum >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    стоимость {crisisValueSum >= 0 ? '+' : '−'}{fmtValue(Math.abs(crisisValueSum))}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-2 text-xs text-slate-400">
+                У каждого кризиса свои функции и свои кресла: провал в первом — выигрыш во втором.
+                Кризис гнул и линию идеала — смотрите отметки 🌪 на графике.
+              </p>
+            </section>
+          )}
 
           {/* Линия идеального управления: итоговая дуэль с теневым управляющим */}
           {finalCmp && (
@@ -546,7 +606,7 @@ export default function BravoSimulator() {
               <p className="text-xs text-slate-400 mt-1 mb-1">
                 теневой управляющий принял ту же сеть и прожил те же 12 месяцев условий — но только с верными ходами
               </p>
-              <IdealLineChart line={finalCmp.line} height={190} />
+              <IdealLineChart line={finalCmp.line} height={190} crisisMonths={crisisMonths} />
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
                 <span><b className="text-emerald-700">— вы</b> · <b className="text-amber-700">- - идеал</b> · серый пунктир — цена при приёмке</span>
                 <span>{finalCmp.pct >= 100 ? `преимущество ${fmtValue(-finalCmp.gap)}` : `отставание ${fmtValue(finalCmp.gap)}`}</span>
@@ -741,6 +801,9 @@ export default function BravoSimulator() {
                 команда {signedMoney(pulse.teamCapital)} · психология {signedMoney(pulse.combo)}
                 {pulse.vacancyPenalty < 0 && <> · вакансии {signedMoney(pulse.vacancyPenalty)}</>}
                 {pulse.payrollPenalty < 0 && <> · ФОТ {signedMoney(pulse.payrollPenalty)}</>}
+                {pulse.parts.some((p) => p.label === 'Репутация кризисов') && (
+                  <> · кризисы {signedMoney(pulse.parts.find((p) => p.label === 'Репутация кризисов')!.amount)}</>
+                )}
               </p>
             </div>
             <div className="text-sm space-y-1">
@@ -774,7 +837,7 @@ export default function BravoSimulator() {
                 {cmp.pct >= 100 ? `🏅 ${cmp.pct}% — вы опережаете идеал!` : `${cmp.pct}% от линии идеала`}
               </span>
             </div>
-            <IdealLineChart line={cmp.line} />
+            <IdealLineChart line={cmp.line} crisisMonths={crisisMonths} />
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
               <span>
                 <b className="text-emerald-700">— вы</b> · <b className="text-amber-700">- - идеал</b> · серый пунктир — цена при приёмке
@@ -785,7 +848,8 @@ export default function BravoSimulator() {
             </div>
             <p className="mt-2 text-xs leading-relaxed text-slate-500">
               Теневой суперуправленец принял ту же сеть «как есть» и играет те же месяцы без ошибок:
-              те же спрос, рынок и скамейка — только верные ходы. Догоните линию, а удача иногда выносит и выше неё.
+              те же спрос, рынок и скамейка — только верные ходы. Кризисы гнут и его линию: один и тот же кризис —
+              сверяйте баллы в итогах месяца. Догоните линию, а удача иногда выносит и выше неё.
               {cmp.moves.length > 0 && <> В этом месяце идеал: {cmp.moves.join('; ')}.</>}
             </p>
           </section>
@@ -1147,6 +1211,9 @@ export default function BravoSimulator() {
               {lastLog.vacancyFine > 0 && (
                 <p className="text-slate-600">Простой вакансий: <b className="text-rose-600">−{fmtMoney(lastLog.vacancyFine)}</b></p>
               )}
+            </div>
+            {lastLog.crisis && <CrisisCard c={lastLog.crisis} month={lastLog.month} intl={intl} />}
+            <div className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
               <p className="text-slate-600">
                 Итог кассы: <b className={lastLog.net >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
                   {lastLog.net >= 0 ? '+' : '−'}{fmtMoney(Math.abs(lastLog.net))}
@@ -1194,6 +1261,7 @@ export default function BravoSimulator() {
                 key={s.ms}
                 onClick={() => setSpeed(s.ms)}
                 title={s.title}
+                aria-label={`Автопилот: ${s.title}`}
                 aria-pressed={speed === s.ms}
                 className={`rounded-lg px-2.5 py-1.5 text-sm ${
                   speed === s.ms ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
@@ -1216,6 +1284,60 @@ export default function BravoSimulator() {
 }
 
 // ---------- Мелкие компоненты ----------
+
+/**
+ * Карточка кризиса месяца: что случилось, как справилась команда
+ * против теневого идеала, кто вытянул и кто просел — сводка после
+ * каждого испытания.
+ */
+function CrisisCard({ c, month, intl }: { c: CrisisLog; month: number; intl: boolean }) {
+  const scoreClass =
+    c.score >= 80 ? 'text-emerald-700' : c.score >= CRISIS_BASELINE ? 'text-slate-800' : c.score >= 45 ? 'text-amber-600' : 'text-rose-600'
+  const pulled = c.contributions.slice(0, 2)
+  const worst = c.contributions.length >= 2 ? c.contributions[c.contributions.length - 1] : null
+  return (
+    <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50/60 p-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold text-slate-800">
+          <span aria-hidden>{c.emoji}</span> {c.title}
+          <span className="ml-2 text-xs font-normal text-slate-400">кризис месяца {month}</span>
+        </p>
+        <span className="flex items-center gap-2 text-sm">
+          <b className={scoreClass}>вы: {c.score}%</b>
+          <span className="text-slate-300">·</span>
+          <span className="text-slate-500">идеал: {c.idealScore}%</span>
+        </span>
+      </div>
+      <p className="mt-1.5 text-sm text-slate-600">{c.narrative}</p>
+      <p className="mt-1.5 text-sm">
+        <span className={c.cashImpact >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
+          💵 касса {c.cashImpact >= 0 ? '+' : '−'}{fmtMoney(Math.abs(c.cashImpact))}
+        </span>
+        <span className="text-slate-300 mx-2">·</span>
+        <span className={c.valueImpact >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
+          📈 стоимость {c.valueImpact >= 0 ? '+' : '−'}{fmtMoney(Math.abs(c.valueImpact))}
+        </span>
+      </p>
+      {pulled.length > 0 && (
+        <p className="mt-1.5 text-sm text-slate-600">
+          💪 Вытянули: {pulled.map((k) => `${k.postTitle} — ${label(k.type, intl)} (${k.fn} ${Math.round(k.fnWeight / 10)}/10)`).join(' · ')}
+        </p>
+      )}
+      {worst && (
+        <p className="mt-0.5 text-sm text-slate-500">
+          😓 Просел: {worst.postTitle} — {label(worst.type, intl)} ({worst.fn} {Math.round(worst.fnWeight / 10)}/10, проф {worst.prof}%)
+        </p>
+      )}
+      {c.score < CRISIS_BASELINE && (
+        <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+          У каждого кризиса свой набор функций и кресел: провал здесь — ещё не приговор,
+          а шанс для других людей. Смотрите, какие роли требовались, и усиливайте эти кресла —
+          следующий кризис потребует другого.
+        </p>
+      )}
+    </div>
+  )
+}
 
 function quadraChip(q: QuadraId): string {
   const c = QUADRA_COLORS[q]
@@ -1346,7 +1468,7 @@ function AssignmentPreviewCard({ pv, confirmLabel, onConfirm }: {
  * золотой пунктир — теневой идеальный управляющий в тех же условиях,
  * серая горизонталь — цена сети на момент приёмки.
  */
-function IdealLineChart({ line, height = 140 }: { line: IdealLinePoint[]; height?: number }) {
+function IdealLineChart({ line, height = 140, crisisMonths = [] }: { line: IdealLinePoint[]; height?: number; crisisMonths?: number[] }) {
   const W = 640
   const PL = 10
   const PR = 10
@@ -1362,6 +1484,7 @@ function IdealLineChart({ line, height = 140 }: { line: IdealLinePoint[]; height
     line.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ')
   const last = line[line.length - 1]
   const ahead = last.player >= last.ideal
+  const monthIndex = new Map(line.map((p, i) => [p.month, i]))
   return (
     <svg
       viewBox={`0 0 ${W} ${height}`}
@@ -1374,6 +1497,16 @@ function IdealLineChart({ line, height = 140 }: { line: IdealLinePoint[]; height
         x1={PL} x2={W - PR} y1={y(line[0].player)} y2={y(line[0].player)}
         stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 4"
       />
+      {/* кризисы: розовые вертикали месяцев с испытанием */}
+      {crisisMonths.map((m) => {
+        const i = monthIndex.get(m)
+        return i === undefined ? null : (
+          <line
+            key={m} x1={x(i)} x2={x(i)} y1={PT} y2={height - PB}
+            stroke="#f43f5e" strokeWidth="1" strokeDasharray="2 3" opacity="0.4"
+          />
+        )
+      })}
       <path d={path('ideal')} fill="none" stroke="#d97706" strokeWidth="2" strokeDasharray="6 4" strokeLinejoin="round" strokeLinecap="round" />
       <path d={path('player')} fill="none" stroke="#047857" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
       <circle cx={x(line.length - 1)} cy={y(last.ideal)} r="3.5" fill="#d97706" />
