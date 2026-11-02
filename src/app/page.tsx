@@ -1089,7 +1089,7 @@ export default function BravoSimulator() {
                 <p className="text-sm text-slate-700">
                   Разведка: <b>{pendingMinister.name}</b> ({pendingMinister.role}) готовит решение по портфелю
                   «{portfolioTitle(pendingCrisis.sponsor)}» — тип-версия <b>{pendingMinister.typeRu}</b>{' '}
-                  ({label(typeByRu(pendingMinister.typeRu), intl)}, {pendingMinister.note}).
+                  ({intl ? typeByRu(pendingMinister.typeRu).intlName : typeByRu(pendingMinister.typeRu).name}, {pendingMinister.note}).
                 </p>
                 <p className="mt-1 text-sm text-slate-600">
                   Возможное испытание: <b>{pendingCrisis.emoji} {pendingCrisis.title}</b>. Кресла:{' '}
@@ -1166,7 +1166,7 @@ export default function BravoSimulator() {
                   <div className="flex flex-wrap items-center justify-between gap-1.5">
                     <p className="font-semibold text-slate-800">{m.name}</p>
                     <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                      {m.typeRu} · {label(typeByRu(m.typeRu), intl)}
+                      {m.typeRu} · {intl ? typeByRu(m.typeRu).intlName : typeByRu(m.typeRu).name}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">{m.role}</p>
@@ -1185,7 +1185,7 @@ export default function BravoSimulator() {
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <p className="font-semibold text-slate-800">{CABINET_PRESIDENT.name}</p>
                 <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                  {CABINET_PRESIDENT.typeRu} · {label(typeByRu(CABINET_PRESIDENT.typeRu), intl)}
+                  {CABINET_PRESIDENT.typeRu} · {intl ? typeByRu(CABINET_PRESIDENT.typeRu).intlName : typeByRu(CABINET_PRESIDENT.typeRu).name}
                 </span>
               </div>
               <p className="text-xs text-slate-500">{CABINET_PRESIDENT.role}</p>
@@ -1214,7 +1214,7 @@ export default function BravoSimulator() {
                   <div className="flex flex-wrap items-center justify-between gap-1.5">
                     <p className="font-semibold text-slate-800">{m.name}</p>
                     <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                      {m.typeRu} · {label(typeByRu(m.typeRu), intl)}
+                      {m.typeRu} · {intl ? typeByRu(m.typeRu).intlName : typeByRu(m.typeRu).name}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">{m.role}</p>
