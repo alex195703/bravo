@@ -24,7 +24,7 @@ import {
 import { typeByRu, modelA, shuffle } from './socionics-quiz'
 import {
   relationBetween, PAIR_SCORE, RELATION_CATEGORY,
-  type RelationKind,
+  type RelationKind, type DirectedRole,
 } from './relations'
 
 // ---------- Должности в сети «Браво» ----------
@@ -223,42 +223,358 @@ export interface Crisis {
   involved: string[]
   /** Требуемые аспекты и их вес */
   demands: Partial<Record<FunctionId, number>>
+  /** Портфель Кабмина, который это испытание приносит */
+  sponsor: string
 }
 
 export const CRISES: Crisis[] = [
-  { id: 'milk', title: 'Сорвалась поставка молока', emoji: '🥛',
+  { id: 'milk', title: 'Сорвалась поставка молока', emoji: '🥛', sponsor: 'agro',
     description: 'Главный поставщик молочки не привёз товар. К утру полки опустеют: срочно вести переговоры и искать замену.',
     involved: ['com', 'log', 'qa'],
     demands: { 'ЧЛ': 1, 'ЧИ': 0.8, 'БИ': 0.7 } },
-  { id: 'competitor', title: 'Конкурент напротив', emoji: '🏗',
+  { id: 'competitor', title: 'Конкурент напротив', emoji: '🏗', sponsor: 'economy',
     description: 'Федеральная сеть открыла гипермаркет напротив флагмана «Браво». Клиенты уходят, началась ценовая война.',
     involved: ['mkt', 'ret', 'fin'],
     demands: { 'ЧС': 1, 'ЧЭ': 0.8, 'ЧЛ': 0.7 } },
-  { id: 'inspection', title: 'Внеплановая проверка', emoji: '🧾',
+  { id: 'inspection', title: 'Внеплановая проверка', emoji: '🧾', sponsor: 'health',
     description: 'Санитарная служба пришла без предупреждения. Нужны документы, регламенты и безупречные полки.',
     involved: ['qa', 'log', 'ret'],
     demands: { 'БЛ': 1, 'БС': 0.8, 'БЭ': 0.5 } },
-  { id: 'cashiers', title: 'Кассиры увольняются', emoji: '😤',
+  { id: 'cashiers', title: 'Кассиры увольняются', emoji: '😤', sponsor: 'social',
     description: 'Три кассира написали заявление за один день. Либо удержать людей, либо срочно организовать набор.',
     involved: ['hr', 'ret', 'it'],
     demands: { 'БЭ': 1, 'ЧЭ': 0.8, 'ЧЛ': 0.7 } },
-  { id: 'prices', title: 'Поставщики подняли цены', emoji: '📈',
+  { id: 'prices', title: 'Поставщики подняли цены', emoji: '📈', sponsor: 'finance',
     description: 'Закупочные цены на базовые товары выросли на 15%. Надо пересчитывать наценку и торговаться.',
     involved: ['fin', 'com'],
     demands: { 'ЧЛ': 1, 'БЛ': 0.9, 'ЧИ': 0.6 } },
-  { id: 'pos', title: 'Кассы встали', emoji: '🖥',
+  { id: 'pos', title: 'Кассы встали', emoji: '🖥', sponsor: 'digital',
     description: 'Программа учёта упала в субботний вечер: очереди на кассах, недовольные покупатели.',
     involved: ['it', 'ret', 'fin'],
     demands: { 'БЛ': 1, 'ЧЛ': 0.8, 'ЧС': 0.5 } },
-  { id: 'blogger', title: 'Разгромный обзор блогера', emoji: '📱',
+  { id: 'blogger', title: 'Разгромный обзор блогера', emoji: '📱', sponsor: 'culture',
     description: 'Блогер снял ролик «в „Браво“ несвежий хлеб». Просмотры растут на глазах, сеть в трендах.',
     involved: ['mkt', 'qa', 'hr'],
     demands: { 'ЧЭ': 1, 'БС': 0.8, 'ЧИ': 0.7 } },
-  { id: 'expansion', title: 'Открыть пятый магазин?', emoji: '🏬',
+  { id: 'expansion', title: 'Открыть пятый магазин?', emoji: '🏬', sponsor: 'premier',
     description: 'Арендодатель предлагает выгодное помещение. Сеть на подъёме, но ресурсы команды не резиновые.',
     involved: ['fin', 'com', 'ret'],
     demands: { 'ЧИ': 1, 'БИ': 0.8, 'ЧЛ': 0.8, 'ЧС': 0.6 } },
+  { id: 'blackout', title: 'Блэкаут: сеть без света', emoji: '🕯', sponsor: 'energy',
+    description: 'Удар по энергетике оставил магазины без света и холодильников. Генераторы, расписания, спасение товара — счёт на часы.',
+    involved: ['it', 'ret', 'log'],
+    demands: { 'ЧС': 1, 'ЧЛ': 0.8, 'БИ': 0.6 } },
+  { id: 'audit', title: 'Налоговый аудит ФОТ', emoji: '🏦', sponsor: 'finance',
+    description: 'Налоговая запросила документы по зарплатам за три года. Нужны аккуратные бумаги и спокойные переговоры.',
+    involved: ['fin', 'hr', 'log'],
+    demands: { 'БЛ': 1, 'ЧЛ': 0.7, 'БЭ': 0.5 } },
+  { id: 'reservation', title: 'Бронирование сотрудников', emoji: '🛡', sponsor: 'defense',
+    description: 'Обновление данных воинского учёта: сети надо подтвердить критичность сотрудников и оформить брони, иначе ключевые люди выбывают из сети.',
+    involved: ['hr', 'ret', 'qa'],
+    demands: { 'БЛ': 1, 'БЭ': 0.8, 'ЧС': 0.5 } },
 ]
+
+// ---------- КАБИНЕТ МИНИСТРОВ: политический слой кризисов ----------
+//
+// Кризисы больше не приходят «из воздуха»: у каждого есть портфель-
+// спонсор в реальном Кабинете министров Украины (состав июля 2026).
+// Действующий министр смотрит на испытание сквозь призму своей
+// тип-версии: его базовая функция добавляется к требованиям кризиса.
+// Разведка заранее предупреждает, чей портфель «горит», а сеть может
+// отправить сотрудника на лоббистскую встречу: интертипные отношения
+// сотрудника с министром решают, договорятся они или насорятся.
+// В середине года — политический сезон: портфели могут перейти к
+// политикам из альтернативного пула («возможная конфигурация»).
+//
+// Досье — открытые источники (июль–октябрь 2026). Соционические типы —
+// версии: часть из них — типирования соционического сообщества
+// (typuvannia.info, социофорумы), часть — авторские игровые версии.
+// Всё это игровая условность, а не характеристика реальных людей.
+
+export interface Portfolio { id: string; title: string }
+
+export const PORTFOLIOS: Portfolio[] = [
+  { id: 'premier', title: 'Кабмин · бизнес-климат' },
+  { id: 'finance', title: 'Минфин' },
+  { id: 'economy', title: 'Минэкономики' },
+  { id: 'energy', title: 'Минэнергетики' },
+  { id: 'defense', title: 'Минобороны' },
+  { id: 'digital', title: 'Минцифры' },
+  { id: 'health', title: 'Минздрав' },
+  { id: 'social', title: 'Минсоцполитики' },
+  { id: 'agro', title: 'Минагрополитики' },
+  { id: 'culture', title: 'Гуманитарная политика' },
+]
+
+export function portfolioTitle(portfolio: string): string {
+  return PORTFOLIOS.find((p) => p.id === portfolio)?.title ?? portfolio
+}
+
+export type PoliticianStatus = 'current' | 'alternative' | 'president'
+
+export interface Politician {
+  id: string
+  name: string
+  role: string
+  /** портфель (у президента null) */
+  portfolio: string | null
+  /** ru-код соционической версии: 'СЛЭ', 'ЭИЭ' и т.д. */
+  typeRu: string
+  /** чья версия: сообщества (есть типирования) или авторская игровая */
+  origin: 'community' | 'author'
+  /** оговорка о происхождении версии */
+  note: string
+  /** публично проверяемое досье (коротко) */
+  bio: string
+  status: PoliticianStatus
+}
+
+/** Действующий кабинет (состав утверждён Радой 16.07.2026) */
+export const CABINET_MINISTERS: Politician[] = [
+  {
+    id: 'koretskyi', name: 'Сергей Корецкий', role: 'Премьер-министр',
+    portfolio: 'premier', typeRu: 'СЛЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Беспартийный топ-менеджер нефтегазового сектора: директор «Укрнафты» и «Укртатнафты» (2022—2025), глава правления «Нафтогаза» (с мая 2025). Премьер с 16.07.2026: в первой программе — переживание зимы, поддержка бизнеса, вступление в ЕС.',
+  },
+  {
+    id: 'shmyhal', name: 'Денис Шмыгаль', role: 'Первый вице-премьер · министр энергетики',
+    portfolio: 'energy', typeRu: 'ЛСИ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Премьер-министр (2020—2025), министр обороны (2025—2026), с июля 2026 — первый вице-премьер и министр энергетики: опытнейший менеджер исполнительной власти.',
+  },
+  {
+    id: 'marchenko', name: 'Сергей Марченко', role: 'Министр финансов',
+    portfolio: 'finance', typeRu: 'ИЛИ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Минфин бессменно с марта 2020 — дольше всех в кабинете: фискальная консервативность, доходы бюджета, устойчивая гривна и переговоры с донорами.',
+  },
+  {
+    id: 'kravchenko', name: 'Александр Кравченко', role: 'Министр экономики',
+    portfolio: 'economy', typeRu: 'ЛИЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Менеджер агробизнеса, министр экономики с июля 2026: деловой климат, конкуренция и антимонопольная политика.',
+  },
+  {
+    id: 'hmara', name: 'Евгений Хмара', role: 'Министр обороны',
+    portfolio: 'defense', typeRu: 'СЛИ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Министр обороны с июля 2026: тыл, оборонный заказ и контрактная служба.',
+  },
+  {
+    id: 'ferchuk', name: 'Оксана Ферчук', role: 'Министр цифровой трансформации',
+    portfolio: 'digital', typeRu: 'ИЛЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Министр цифровой трансформации с июля 2026: цифровизация госуслуг и автоматизация.',
+  },
+  {
+    id: 'liashko', name: 'Виктор Ляшко', role: 'Министр здравоохранения',
+    portfolio: 'health', typeRu: 'ЛСЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Врач-эпидемиолог, министр здравоохранения с 2021: санитарные правила, проверки и стандарты — его повседневный инструментарий.',
+  },
+  {
+    id: 'uliutin', name: 'Денис Улютин', role: 'Министр социальной политики',
+    portfolio: 'social', typeRu: 'ЛСИ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Экс-заместитель министра финансов, в социальной политике с 2025: выплаты, занятость и рынок труда.',
+  },
+  {
+    id: 'vysockyi', name: 'Тарас Высоцкий', role: 'Министр аграрной политики',
+    portfolio: 'agro', typeRu: 'СЭЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Агроэкономист, министр аграрной политики и продовольствия: переговоры с фермерами и экспортёрами, продовольственная безопасность.',
+  },
+  {
+    id: 'berezhna', name: 'Татьяна Бережная', role: 'Вице-премьер по гуманитарной политике · министр культуры',
+    portfolio: 'culture', typeRu: 'ЭСЭ', origin: 'author', status: 'current',
+    note: 'авторская игровая версия типа',
+    bio: 'Вице-премьер по гуманитарной политике и министр культуры с июля 2026: коммуникации, информационная политика, культурная сфера.',
+  },
+]
+
+/** Президент — вне портфелей, фон политического поля */
+export const CABINET_PRESIDENT: Politician = {
+  id: 'zelensky', name: 'Владимир Зеленский', role: 'Президент Украины',
+  portfolio: null, typeRu: 'ЭИЭ', origin: 'community', status: 'president',
+  note: 'частая версия сообщества (typuvannia.info, социофорумы); часть типирований — ИЭЭ (Гексли)',
+  bio: 'Президент с 2019. Военное положение продлено до 29.01.2027 — выборы не назначены; в опросе «Рейтинга» (октябрь 2026) — среди лидеров президентской гонки.',
+}
+
+/** Возможные конфигурации после выборов/перестановок: «альтернативный пул» */
+export const CABINET_ALTERNATIVES: Politician[] = [
+  {
+    id: 'poroshenko', name: 'Пётр Порошенко', role: 'возможный премьер-министр',
+    portfolio: 'premier', typeRu: 'СЭЭ', origin: 'community', status: 'alternative',
+    note: 'версия сообщества (typuvannia.info)',
+    bio: 'Экс-президент (2014—2019), лидер «Европейской солидарности», основатель Roshen: самый узнаваемый кандидат в премьеры от оппозиции.',
+  },
+  {
+    id: 'tymoshenko', name: 'Юлия Тимошенко', role: 'возможный премьер-министр',
+    portfolio: 'premier', typeRu: 'СЛЭ', origin: 'community', status: 'alternative',
+    note: 'версия сообщества (typuvannia.info)',
+    bio: 'Лидер «Батькивщины», экс-премьер (2007—2010): ветеран газовых и бюджетных переговоров, вечный кандидат в сильные кабинеты.',
+  },
+  {
+    id: 'zaluzhny', name: 'Валерий Залужный', role: 'возможный министр обороны',
+    portfolio: 'defense', typeRu: 'ЛСИ', origin: 'community', status: 'alternative',
+    note: 'версия сообщества (typuvannia.info)',
+    bio: 'Экс-главком ВСУ (2021—2024): в опросе «Рейтинга» (октябрь 2026) — первый или второй кандидат в президенты.',
+  },
+  {
+    id: 'yatseniuk', name: 'Арсений Яценюк', role: 'возможный министр экономики',
+    portfolio: 'economy', typeRu: 'ЛИЭ', origin: 'community', status: 'alternative',
+    note: 'версия сообщества (typuvannia.info)',
+    bio: 'Экс-премьер (2014—2016): экономические реформы, переговоры с кредиторами, ветеран нескольких кабинетов.',
+  },
+  {
+    id: 'vakarchuk', name: 'Святослав Вакарчук', role: 'возможный вице-премьер по гуманитарной политике',
+    portfolio: 'culture', typeRu: 'ИЛЭ', origin: 'community', status: 'alternative',
+    note: 'версия сообщества (typuvannia.info)',
+    bio: 'Музыкант «Океан Ельзи», экс-депутат: самая узнаваемая гуманитарная фигура вне текущей власти.',
+  },
+]
+
+export const CABINET_PEOPLE: Politician[] = [
+  CABINET_PRESIDENT, ...CABINET_MINISTERS, ...CABINET_ALTERNATIVES,
+]
+
+const POLITICIAN_INDEX = new Map(CABINET_PEOPLE.map((p) => [p.id, p]))
+
+export function politicianById(id: string): Politician | null {
+  return POLITICIAN_INDEX.get(id) ?? null
+}
+
+export const DEFAULT_SPONSORS: Record<string, string> = Object.fromEntries(
+  CABINET_MINISTERS.map((m) => [m.portfolio as string, m.id]),
+)
+
+export interface LobbyRequest {
+  portfolio: string
+  ru: string
+  cost: number
+}
+
+export interface GovernmentState {
+  /** портфель → id действующего политика (перестановки меняют) */
+  sponsors: Record<string, string>
+  /** оплаченная заявка на лоббистскую встречу текущего месяца */
+  lobby: LobbyRequest | null
+  /** разведка: кризис, предвычисленный на текущий месяц (id или null) */
+  pendingCrisis: string | null
+  /** политический сезон середины года отработал */
+  reshuffled: boolean
+  /** журнал перестановок для панели */
+  changes: string[]
+}
+
+export function newGovernmentState(): GovernmentState {
+  return {
+    sponsors: { ...DEFAULT_SPONSORS },
+    lobby: null,
+    pendingCrisis: null,
+    reshuffled: false,
+    changes: [],
+  }
+}
+
+/** Кто сидит в портфеле сейчас */
+export function ministerForPortfolio(gov: GovernmentState, portfolio: string): Politician | null {
+  return politicianById(gov.sponsors[portfolio] ?? '')
+}
+
+/** Действующий кабинет в порядке портфелей */
+export function currentCabinet(gov: GovernmentState): Politician[] {
+  return PORTFOLIOS
+    .map((pf) => politicianById(gov.sponsors[pf.id]))
+    .filter((p): p is Politician => p !== null)
+}
+
+/** Базовая функция тип-версии — «запрос министра» к кризису */
+export function ministerDemandBias(p: Politician): FunctionId {
+  const t = typeByRu(p.typeRu)
+  const a = modelA(t)
+  return (a.find((x) => x.n === 1) ?? a[0]).fn
+}
+
+/** Кризис с учётом министра: его базовая функция добавляется к требованиям */
+export function crisisWithMinister(crisis: Crisis, minister: Politician): Crisis {
+  const fn = ministerDemandBias(minister)
+  const old = crisis.demands[fn] ?? 0
+  return { ...crisis, demands: { ...crisis.demands, [fn]: Math.max(old, 0.5) } }
+}
+
+/** Кризисы, которые приносит портфель */
+export function crisesOfPortfolio(portfolio: string): Crisis[] {
+  return CRISES.filter((c) => c.sponsor === portfolio)
+}
+
+/** Цена лоббистской встречи, грн */
+export const LOBBY_COST = 350_000
+
+/**
+ * Бонус встречи: интертипные отношения лоббиста с тип-версией министра.
+ * Дуал легко договорится (+15), конфликтник насорит (−5).
+ */
+export function lobbyBonusFor(
+  lobbyist: SocioType, minister: Politician,
+): { bonus: number; kind: RelationKind; roleA?: DirectedRole } {
+  const rel = relationBetween(lobbyist, typeByRu(minister.typeRu))
+  let bonus = 0
+  switch (rel.kind) {
+    case 'дуальность': bonus = 15; break
+    case 'активация':
+    case 'деловые': bonus = 12; break
+    case 'зеркальность':
+    case 'родственные':
+    case 'полудуальность': bonus = 9; break
+    case 'тождество': bonus = 6; break
+    case 'мираж':
+    case 'квазитождество':
+    case 'суперэго': bonus = 4; break
+    case 'заказ': bonus = rel.roleA === 'заказчик' ? 11 : 5; break
+    case 'ревизия': bonus = rel.roleA === 'ревизор' ? 6 : 2; break
+    case 'погашение': bonus = 2; break
+    case 'конфликт': bonus = -5; break
+  }
+  return { bonus, kind: rel.kind, roleA: rel.roleA }
+}
+
+/** Политический разворот середины года: месяц и шанс перестановок */
+export const RESHUFFLE_MONTH = 7
+export const RESHUFFLE_CHANCE = 0.55
+
+/**
+ * Перестановки: 1–2 портфеля из альтернативного пула сменяют
+ * действующих министров. Отыгрывает в месяц RESHUFFLE_MONTH.
+ */
+function runReshuffle(sponsors: Record<string, string>): { sponsors: Record<string, string>; texts: string[] } {
+  if (Math.random() >= RESHUFFLE_CHANCE) {
+    return { sponsors, texts: ['🏛 Политический сезон прошёл спокойно: действующий кабинет сохранился'] }
+  }
+  const portfolios = [...new Set(CABINET_ALTERNATIVES.map((p) => p.portfolio as string))]
+  const count = Math.random() < 0.5 ? 1 : 2
+  const picked = shuffle(portfolios).slice(0, count)
+  const next = { ...sponsors }
+  const texts: string[] = []
+  for (const pf of picked) {
+    const options = CABINET_ALTERNATIVES.filter((p) => p.portfolio === pf)
+    if (options.length === 0) continue
+    const winner = options[Math.floor(Math.random() * options.length)]
+    const oldName = politicianById(next[pf] ?? '')?.name ?? '—'
+    next[pf] = winner.id
+    texts.push(`🏛 Перестановки в Кабмине: «${portfolioTitle(pf)}» принимает ${winner.name} (${winner.role}, тип-версия ${winner.typeRu}) вместо ${oldName} — запросы кризисов и цели лоббирования меняются`)
+  }
+  return { sponsors: next, texts }
+}
+
+/** Мир готовит кризис на следующий месяц: один и тот же — подряд не бывает */
+function rollPendingCrisis(lastCrisisId: string | null): string | null {
+  const chance = lastCrisisId ? CRISIS_CHANCE_AFTER : CRISIS_CHANCE
+  if (Math.random() >= chance) return null
+  const pool = CRISES.filter((c) => c.id !== lastCrisisId)
+  return pool[Math.floor(Math.random() * pool.length)].id
+}
 
 // ---------- Кадровый рынок ----------
 
@@ -1112,6 +1428,12 @@ export interface CrisisLog extends CrisisOutcome {
   emoji: string
   /** как тот же кризис закрыл теневой идеал */
   idealScore: number
+  /** кто готовил решение: действующий министр портфеля */
+  sponsorName?: string
+  sponsorRole?: string
+  /** бонус лоббистской встречи (0/undefined — встречи не было) */
+  lobbyBonus?: number
+  lobbyKind?: RelationKind
 }
 
 /** Итоги закрытого месяца — для панели «итоги» и финальной истории */
@@ -1165,6 +1487,8 @@ export interface LiveGame {
   valueShift: number
   /** id последнего кризиса — мир не бьёт одним и тем же испытанием подряд */
   lastCrisis: string | null
+  /** Кабинет министров: спонсоры кризисов, лоббирование, разведка (2.5) */
+  gov: GovernmentState
 }
 
 /**
@@ -1278,12 +1602,17 @@ export function crisisImpactOf(score: number): { cashImpact: number; valueImpact
   }
 }
 
-/** Мир приносит кризис: тот же — подряд не бывает */
-function rollCrisis(game: LiveGame): Crisis | null {
-  const chance = game.lastCrisis ? CRISIS_CHANCE_AFTER : CRISIS_CHANCE
+/**
+ * Мир готовит кризис на следующий месяц: один и тот же — подряд не
+ * бывает. (Раньше crisis выкатывалась прямо в closeMonth — теперь
+ * предвычисляется заранее, чтобы разведка предупреждала сеть, а игрок
+ * успевал назначить лоббистскую встречу.)
+ */
+function rollCrisis(lastCrisisId: string | null): string | null {
+  const chance = lastCrisisId ? CRISIS_CHANCE_AFTER : CRISIS_CHANCE
   if (Math.random() >= chance) return null
-  const pool = CRISES.filter((c) => c.id !== game.lastCrisis)
-  return pool[Math.floor(Math.random() * pool.length)]
+  const pool = CRISES.filter((c) => c.id !== lastCrisisId)
+  return pool[Math.floor(Math.random() * pool.length)].id
 }
 
 /** Скамейка месяца: кандидаты, которых нет в штате, и их немного */
@@ -1370,7 +1699,10 @@ export function newLiveGame(): LiveGame {
     promotionsDone: 0,
     valueShift: 0,
     lastCrisis: null,
+    gov: newGovernmentState(),
   }
+  // Разведка месяца 1: Кабмин уже что-то готовит или месяц спокойный
+  game.gov.pendingCrisis = rollCrisis(null)
   const benchCandidates = newBench(game)
   game.roster = [...roster, ...benchCandidates]
   game.bench = benchCandidates.map((c) => c.ru)
@@ -1478,6 +1810,62 @@ export function fireEmployee(game: LiveGame, postId: string): LiveActionResult {
       text: `«${post.title}»: ${old.name} покидает компанию — выплачено ${fmtMoney(severance)} (${SEVERANCE_MONTHS} оклада). Кресло пусто — простой начался`,
       kind: 'bad',
     },
+  }
+}
+
+// ---------- ЛОББИРОВАНИЕ: встреча с министром ----------
+
+/**
+ * Отправить сотрудника на лоббистскую встречу с министром портфеля.
+ * Деньги списываются сразу; если встреча сорвётся (лоббист уйдёт из
+ * штата) — не вернутся. Одна встреча в месяц; до закрытия месяца
+ * заявку можно отменить с полным возвратом.
+ */
+export function requestLobby(game: LiveGame, ru: string, portfolio: string): LiveActionResult {
+  const pending = game.gov.pendingCrisis
+  const pendingCrisis = pending ? CRISES.find((c) => c.id === pending) ?? null : null
+  if (!pendingCrisis || pendingCrisis.sponsor !== portfolio) {
+    return { game, event: { text: 'Разведка не видит решения по этому портфелю — встреча не назначена', kind: 'bad' } }
+  }
+  if (game.gov.lobby) {
+    return { game, event: { text: 'Встреча в этом месяце уже назначена — сначала отмените текущую', kind: 'bad' } }
+  }
+  const cand = game.roster.find((c) => c.ru === ru) ?? null
+  const minister = ministerForPortfolio(game.gov, portfolio)
+  if (!cand || !minister) {
+    return { game, event: { text: 'Встреча не назначена: нет сотрудника или министра', kind: 'bad' } }
+  }
+  if (game.cash < LOBBY_COST) {
+    return { game, event: { text: `Встреча стоит ${fmtMoney(LOBBY_COST)} — в кассе не хватает`, kind: 'bad' } }
+  }
+  const lb = lobbyBonusFor(typeByRu(cand.ru), minister)
+  const next: LiveGame = {
+    ...game,
+    cash: game.cash - LOBBY_COST,
+    gov: { ...game.gov, lobby: { portfolio, ru, cost: LOBBY_COST } },
+  }
+  return {
+    game: next,
+    event: {
+      text: `🤝 Встреча назначена: ${cand.name} (${cand.ru}) едет к ${minister.name} (${minister.role}) — отношения «${lb.kind}», ${lb.bonus >= 0 ? '+' : ''}${lb.bonus} к решению кризиса. Ставка: ${fmtMoney(LOBBY_COST)}`,
+      kind: lb.bonus >= 9 ? 'good' : lb.bonus > 0 ? 'neutral' : 'bad',
+    },
+  }
+}
+
+/** Отменить встречу до закрытия месяца: деньги вернутся в кассу */
+export function cancelLobby(game: LiveGame): LiveActionResult {
+  const lobby = game.gov.lobby
+  if (!lobby) {
+    return { game, event: { text: 'Встреча ещё не назначена', kind: 'neutral' } }
+  }
+  return {
+    game: {
+      ...game,
+      cash: game.cash + lobby.cost,
+      gov: { ...game.gov, lobby: null },
+    },
+    event: { text: `Встречу отменили: ${fmtMoney(lobby.cost)} вернулись в кассу`, kind: 'neutral' },
   }
 }
 
@@ -1918,30 +2306,51 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const fine = liveVacancyFine(game)
 
   // ---------- КРИЗИС МЕСЯЦА ----------
-  // Испытание приносит сам мир, и оно общее: игрок и теневой идеал
-  // закрывают один и тот же кризис каждый своей командой —
-  // тип × квалификация × должность × кризис решают исход.
+  // Испытание приносит Кабинет министров: у каждого кризиса есть
+  // портфель-спонсор, а действующий министр добавляет кризису свой
+  // запрос — базовую функцию своей тип-версии. Кризис один и общий:
+  // игрок и теневой идеал закрывают его каждый своей командой.
+  // Лоббистская встреча подыгрывает только игроку: идеал лоббистов
+  // не нанимает, его линия остаётся чистым эталоном.
   const iView = idealView(game.ideal, game.labor, game.demand)
-  const crisis = rollCrisis(game)
+  const pendingId = game.gov.pendingCrisis
+  const crisis = pendingId ? CRISES.find((c) => c.id === pendingId) ?? null : null
+  const sponsor = crisis ? ministerForPortfolio(game.gov, crisis.sponsor) : null
+  const playCrisis = crisis && sponsor ? crisisWithMinister(crisis, sponsor) : crisis
   let crisisCash = 0
   let crisisValue = 0
   let iCrisisCash = 0
   let iCrisisValue = 0
   let crisisLog: CrisisLog | undefined
-  if (crisis) {
-    const res = simulateCrisis(cab, crisis, game.roster)
-    const imp = crisisImpactOf(res.score)
+  if (crisis && playCrisis) {
+    const res = simulateCrisis(cab, playCrisis, game.roster)
+    // Лоббирование месяца: если заявка попала в портфель кризиса — считаем бонус
+    let lobbyBonus = 0
+    let lobbyKind: RelationKind | undefined
+    const lobby = game.gov.lobby
+    if (lobby && sponsor && lobby.portfolio === crisis.sponsor) {
+      const lob = game.roster.find((c) => c.ru === lobby.ru) ?? null
+      if (lob) {
+        const lb = lobbyBonusFor(typeByRu(lob.ru), sponsor)
+        lobbyBonus = lb.bonus
+        lobbyKind = lb.kind
+      }
+    }
+    const score = Math.max(3, Math.min(100, res.score + lobbyBonus))
+    const imp = crisisImpactOf(score)
     crisisCash = imp.cashImpact
     crisisValue = imp.valueImpact
-    const iRes = simulateCrisis(liveCabinet(iView), crisis, game.ideal.roster)
+    const iRes = simulateCrisis(liveCabinet(iView), playCrisis, game.ideal.roster)
     const iImp = crisisImpactOf(iRes.score)
     iCrisisCash = iImp.cashImpact
     iCrisisValue = iImp.valueImpact
     crisisLog = {
       id: crisis.id, title: crisis.title, emoji: crisis.emoji,
-      score: res.score, idealScore: iRes.score,
+      score, idealScore: iRes.score,
       cashImpact: crisisCash, valueImpact: crisisValue,
       narrative: res.narrative, contributions: res.contributions,
+      sponsorName: sponsor?.name, sponsorRole: sponsor?.role,
+      lobbyBonus: lobbyBonus || undefined, lobbyKind,
     }
   }
 
@@ -1951,14 +2360,28 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const events: MonthEvent[] = []
   if (crisis && crisisLog) {
     events.push({
-      text: `🌪 Кризис «${crisis.emoji} ${crisis.title}»: команда справилась на ${crisisLog.score}% · идеал на ${crisisLog.idealScore}%`,
+      text: `🌪 Кризис «${crisis.emoji} ${crisis.title}»${crisisLog.sponsorName ? ` (решение: ${crisisLog.sponsorName})` : ''}: команда справилась на ${crisisLog.score}% · идеал на ${crisisLog.idealScore}%`,
       kind: crisisLog.score >= CRISIS_BASELINE ? 'good' : 'bad',
     })
+    if (crisisLog.lobbyBonus) {
+      events.push({
+        text: crisisLog.lobbyBonus > 0
+          ? `🤝 Лоббист сработал: встреча с ${crisisLog.sponsorName} (отношения «${crisisLog.lobbyKind}») добавила +${crisisLog.lobbyBonus} к решению кризиса`
+          : `⚡ Лоббист навредил: конфликт с ${crisisLog.sponsorName} снял ${Math.abs(crisisLog.lobbyBonus)} балла с решения кризиса`,
+        kind: crisisLog.lobbyBonus > 0 ? 'good' : 'bad',
+      })
+    }
     events.push({
       text: crisisCash >= 0
         ? `Кризис закрыт с премией: касса +${fmtMoney(crisisCash)}, репутация добавила к стоимости +${fmtMoney(crisisValue)}`
         : `Ущерб кризиса: касса −${fmtMoney(-crisisCash)}, репутация сняла со стоимости −${fmtMoney(-crisisValue)}`,
       kind: crisisCash >= 0 ? 'good' : 'bad',
+    })
+  }
+  if (game.gov.lobby && (!crisis || game.gov.lobby.portfolio !== crisis.sponsor)) {
+    events.push({
+      text: '🤝 Назначенная встреча прошла впустую: приём вёл не тот кабинет — ставка не вернулась',
+      kind: 'bad',
     })
   }
   if (net >= 0) events.push({ text: `Касса пополнилась на ${fmtMoney(net)}`, kind: 'good' })
@@ -2137,12 +2560,38 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
     }
   }
 
+  // ---------- КАБМИН: перестановки и разведка следующего месяца ----------
+  let govNext: GovernmentState = {
+    sponsors: game.gov.sponsors,
+    lobby: null,
+    pendingCrisis: null,
+    reshuffled: game.gov.reshuffled,
+    changes: game.gov.changes,
+  }
+  const govEvents: MonthEvent[] = []
+  if (!finished) {
+    // Политический разворот середины года: портфели могут сменить хозяев
+    if (month === RESHUFFLE_MONTH && !game.gov.reshuffled) {
+      const rs = runReshuffle(game.gov.sponsors)
+      govNext = {
+        ...govNext,
+        sponsors: rs.sponsors,
+        reshuffled: true,
+        changes: [...govNext.changes, ...rs.texts],
+      }
+      for (const t of rs.texts) govEvents.push({ text: t, kind: 'neutral' })
+    }
+    // Разведка: что Кабмин готовит на следующий месяц
+    govNext = { ...govNext, pendingCrisis: rollCrisis(crisis ? crisis.id : null) }
+  }
+
   const labor: MarketMode = finished ? game.labor : rollLabor()
   const demand: DemandMode = finished ? game.demand : rollDemand()
   const interim: LiveGame = {
     ...game, month, cash, labor, demand, slots, roster: rosterNow, bench: [],
     history, promotions, promotionsDone: game.promotionsDone,
     valueShift: valueShiftNow, lastCrisis: crisis ? crisis.id : null,
+    gov: govNext,
   }
   const fresh = finished ? [] : newBench(interim)
   // Идеал тут же делает свои ходы в новом месяце — линия всегда на месяц впереди игрока по решениям
@@ -2159,6 +2608,8 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
     const lastLog = next.history[next.history.length - 1]
     for (const ev of promoEvents) lastLog.events.push(ev)
   }
+  // Новости Кабмина (перестановки) — события закрывшегося месяца
+  for (const ev of govEvents) next.history[next.history.length - 1].events.push(ev)
   // Выход суперуправленца — событие месяца: мимо такой новости пройти нельзя
   const star = fresh.find((c) => c.super)
   if (star) {
