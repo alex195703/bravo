@@ -1058,6 +1058,8 @@ export interface IdealState {
   history: { month: number; value: number }[]
   /** что идеал сделал в текущем месяце — для панели сравнения */
   moves: string[]
+  /** накопленная репутация кризисов теневой компании, грн */
+  valueShift: number
 }
 
 /** Точка линии: стоимость игрока и идеала на один месяц */
@@ -1090,6 +1092,28 @@ export const IDEAL_MAX_SWAPS = 2
 
 export interface MonthEvent { text: string; kind: 'good' | 'bad' | 'neutral' }
 
+/** Исход кризиса для одной компании: игрока или теневого идеала */
+export interface CrisisOutcome {
+  /** 3…100 — насколько хорошо команда закрыла испытание */
+  score: number
+  /** ± грн к кассе за месяц */
+  cashImpact: number
+  /** ± грн к стоимости компании (репутация) */
+  valueImpact: number
+  narrative: string
+  /** кто и чем вытащил (сверху) или просел (снизу) */
+  contributions: Contribution[]
+}
+
+/** Кризис месяца в истории: мир один, компании две */
+export interface CrisisLog extends CrisisOutcome {
+  id: string
+  title: string
+  emoji: string
+  /** как тот же кризис закрыл теневой идеал */
+  idealScore: number
+}
+
 /** Итоги закрытого месяца — для панели «итоги» и финальной истории */
 export interface MonthLog {
   month: number
@@ -1107,6 +1131,8 @@ export interface MonthLog {
   /** кто ушёл с рынка кадров */
   left: string[]
   events: MonthEvent[]
+  /** кризис месяца — если мир принёс испытание */
+  crisis?: CrisisLog
 }
 
 /** Полное состояние сценария «Компания как есть» */
@@ -1135,13 +1161,18 @@ export interface LiveGame {
   promotions: PromotionRequest[]
   /** сколько повышений сделал игрок за год */
   promotionsDone: number
+  /** накопленная репутация кризисов: ± грн к стоимости компании */
+  valueShift: number
+  /** id последнего кризиса — мир не бьёт одним и тем же испытанием подряд */
+  lastCrisis: string | null
 }
 
 /**
- * Достаточный срез состояния для расчётов (кресла, люди, конъюнктура):
- * и живая партия, и теневая компания идеала передаются одним типом.
+ * Достаточный срез состояния для расчётов (кресла, люди, конъюнктура,
+ * репутация кризисов): и живая партия, и теневая компания идеала
+ * передаются одним типом.
  */
-export type LiveCore = Pick<LiveGame, 'slots' | 'roster' | 'labor' | 'demand'>
+export type LiveCore = Pick<LiveGame, 'slots' | 'roster' | 'labor' | 'demand' | 'valueShift'>
 
 /** Кабинет живой компании в общем формате (стоимость, ФОТ, сплочённость) */
 export function liveCabinet(game: LiveCore): Cabinet {
@@ -1191,7 +1222,14 @@ export function liveRevenue(game: LiveCore): number {
 
 /** Стоимость компании прямо сейчас (множитель — рынок труда месяца) */
 export function liveValue(game: LiveCore): CompanyValue {
-  return companyValue(liveCabinet(game), game.roster, game.labor)
+  const cv = companyValue(liveCabinet(game), game.roster, game.labor)
+  const shift = Math.round(game.valueShift ?? 0)
+  if (shift === 0) return cv
+  return {
+    ...cv,
+    total: cv.total + shift,
+    parts: [...cv.parts, { label: 'Репутация кризисов', amount: shift, hint: 'пережитые кризисы: клиенты помнят' }],
+  }
 }
 
 function rollDemand(): DemandMode {
@@ -1202,6 +1240,50 @@ function rollDemand(): DemandMode {
 function rollLabor(): MarketMode {
   const r = Math.random()
   return r < 0.25 ? 'plenty' : r < 0.75 ? 'normal' : 'drought'
+}
+
+// ---------- КРИЗИСЫ КАК МЕСЯЧНЫЕ СОБЫТИЯ ----------
+//
+// Отзыв игрока: «кризисы как месячные события, исход = тип ×
+// квалификация × должность × кризис; провал в первом — выигрыш
+// во втором». Отсюда:
+//
+//  • каждый месяц мир может принести испытание (CRISES): у каждого
+//    кризиса свой набор задействованных кресел и требуемых функций,
+//    поэтому один и тот же человек проваливает один кризис и
+//    блестяще закрывает другой;
+//  • счёт кризиса (simulateCrisis) превращается в деньги: ниже
+//    порога — ущерб кассе и репутации, выше — премия;
+//  • кризис общий: теневой идеал закрывает тот же месяц тем же
+//    кризисом своей командой — линия идеала гнётся вместе с миром;
+//  • повтор подряд подавляется: сеть переводит дух после кризиса.
+
+/** Шанс кризиса в обычном месяце */
+export const CRISIS_CHANCE = 0.42
+/** Шанс кризиса сразу после кризиса: сеть переводит дух */
+export const CRISIS_CHANCE_AFTER = 0.25
+/** Порог «справились»: за каждый пункт ниже — ущерб, выше — выигрыш */
+export const CRISIS_BASELINE = 70
+/** Грн кассы за один пункт от порога */
+export const CRISIS_CASH_PER_PT = 60_000
+/** Грн стоимости компании за один пункт от порога (репутация) */
+export const CRISIS_VALUE_PER_PT = 50_000
+
+/** Деньги кризиса: счёт команды превращается в кассу и репутацию */
+export function crisisImpactOf(score: number): { cashImpact: number; valueImpact: number } {
+  const pts = score - CRISIS_BASELINE
+  return {
+    cashImpact: round10k(pts * CRISIS_CASH_PER_PT),
+    valueImpact: round10k(pts * CRISIS_VALUE_PER_PT),
+  }
+}
+
+/** Мир приносит кризис: тот же — подряд не бывает */
+function rollCrisis(game: LiveGame): Crisis | null {
+  const chance = game.lastCrisis ? CRISIS_CHANCE_AFTER : CRISIS_CHANCE
+  if (Math.random() >= chance) return null
+  const pool = CRISES.filter((c) => c.id !== game.lastCrisis)
+  return pool[Math.floor(Math.random() * pool.length)]
 }
 
 /** Скамейка месяца: кандидаты, которых нет в штате, и их немного */
@@ -1283,9 +1365,11 @@ export function newLiveGame(): LiveGame {
     bench: [],
     history: [],
     startValue: 0,
-    ideal: { cash: LIVE_CASH_START, slots: {}, roster: [], history: [], moves: [] },
+    ideal: { cash: LIVE_CASH_START, slots: {}, roster: [], history: [], moves: [], valueShift: 0 },
     promotions: [],
     promotionsDone: 0,
+    valueShift: 0,
+    lastCrisis: null,
   }
   const benchCandidates = newBench(game)
   game.roster = [...roster, ...benchCandidates]
@@ -1299,6 +1383,7 @@ export function newLiveGame(): LiveGame {
       roster: [...roster],
       history: [],
       moves: [],
+      valueShift: 0,
     },
     benchCandidates, game.labor, game.demand,
   )
@@ -1400,7 +1485,7 @@ export function fireEmployee(game: LiveGame, postId: string): LiveActionResult {
 
 /** Вид теневой компании для общих расчётов — теми же формулами */
 function idealView(st: IdealState, labor: MarketMode, demand: DemandMode): LiveCore {
-  return { slots: st.slots, roster: st.roster, labor, demand }
+  return { slots: st.slots, roster: st.roster, labor, demand, valueShift: st.valueShift ?? 0 }
 }
 
 /** Кадровая выплата в теневой компании: подъёмные + секверанс, грн */
@@ -1427,7 +1512,7 @@ export function idealMoves(
   void labor; void demand
   let cur: IdealState = {
     cash: st.cash, slots: { ...st.slots }, roster: [...st.roster],
-    history: st.history, moves: [],
+    history: st.history, moves: [], valueShift: st.valueShift ?? 0,
   }
   const taken = new Set<string>()
   const bestFor = (postId: string): { c: Candidate; fit: number } | null => {
@@ -1728,7 +1813,7 @@ export function assignPreview(game: LiveGame, ru: string, postId: string): Assig
   const rosterAfter = game.roster
     .filter((c) => c.ru !== displacedRu)
     .map((c) => (c.ru === ru ? { ...c, salary: salaryAfter } : c))
-  const after: LiveCore = { slots: slotsAfter, roster: rosterAfter, labor: game.labor, demand: game.demand }
+  const after: LiveCore = { slots: slotsAfter, roster: rosterAfter, labor: game.labor, demand: game.demand, valueShift: game.valueShift }
   const afterProfile = companyProfile(after)
   const valueAfter = liveValue(after).total
   const fnChanges = before.functions
@@ -1824,17 +1909,58 @@ export function promoteEmployee(game: LiveGame, ru: string, postId: string): Liv
   return { game: next, event: { text, kind: 'good' } }
 }
 
-/** Закрыть месяц: обороты, простой, стоимость — и время идёт дальше */
+/** Закрыть месяц: обороты, простой, кризис, стоимость — и время идёт дальше */
 export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean } {
   const cab = liveCabinet(game)
   const pay = payroll(cab, game.roster)
   const revenue = liveRevenue(game)
   const opex = round10k(OPEX_BASE * DEMAND_MODES[game.demand].opexMult)
   const fine = liveVacancyFine(game)
-  const net = revenue - pay - opex - fine
+
+  // ---------- КРИЗИС МЕСЯЦА ----------
+  // Испытание приносит сам мир, и оно общее: игрок и теневой идеал
+  // закрывают один и тот же кризис каждый своей командой —
+  // тип × квалификация × должность × кризис решают исход.
+  const iView = idealView(game.ideal, game.labor, game.demand)
+  const crisis = rollCrisis(game)
+  let crisisCash = 0
+  let crisisValue = 0
+  let iCrisisCash = 0
+  let iCrisisValue = 0
+  let crisisLog: CrisisLog | undefined
+  if (crisis) {
+    const res = simulateCrisis(cab, crisis, game.roster)
+    const imp = crisisImpactOf(res.score)
+    crisisCash = imp.cashImpact
+    crisisValue = imp.valueImpact
+    const iRes = simulateCrisis(liveCabinet(iView), crisis, game.ideal.roster)
+    const iImp = crisisImpactOf(iRes.score)
+    iCrisisCash = iImp.cashImpact
+    iCrisisValue = iImp.valueImpact
+    crisisLog = {
+      id: crisis.id, title: crisis.title, emoji: crisis.emoji,
+      score: res.score, idealScore: iRes.score,
+      cashImpact: crisisCash, valueImpact: crisisValue,
+      narrative: res.narrative, contributions: res.contributions,
+    }
+  }
+
+  const net = revenue - pay - opex - fine + crisisCash
   let cash = game.cash + net
 
   const events: MonthEvent[] = []
+  if (crisis && crisisLog) {
+    events.push({
+      text: `🌪 Кризис «${crisis.emoji} ${crisis.title}»: команда справилась на ${crisisLog.score}% · идеал на ${crisisLog.idealScore}%`,
+      kind: crisisLog.score >= CRISIS_BASELINE ? 'good' : 'bad',
+    })
+    events.push({
+      text: crisisCash >= 0
+        ? `Кризис закрыт с премией: касса +${fmtMoney(crisisCash)}, репутация добавила к стоимости +${fmtMoney(crisisValue)}`
+        : `Ущерб кризиса: касса −${fmtMoney(-crisisCash)}, репутация сняла со стоимости −${fmtMoney(-crisisValue)}`,
+      kind: crisisCash >= 0 ? 'good' : 'bad',
+    })
+  }
   if (net >= 0) events.push({ text: `Касса пополнилась на ${fmtMoney(net)}`, kind: 'good' })
   else events.push({ text: `Месяц закрыт с дефицитом ${fmtMoney(-net)}`, kind: 'bad' })
   if (cash < 0) {
@@ -1855,7 +1981,9 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const prevValue = game.history.length > 0
     ? game.history[game.history.length - 1].value
     : game.startValue
-  const value = liveValue(game).total
+  // Репутация кризисов — часть стоимости: считаем цену уже с новым сдвигом
+  const valueShiftNow = (game.valueShift ?? 0) + crisisValue
+  const value = liveValue({ ...game, valueShift: valueShiftNow }).total
   const valueDelta = value - prevValue
   events.push({
     text: `Стоимость компании ${valueDelta >= 0 ? 'выросла' : 'просела'} на ${fmtMoney(Math.abs(valueDelta))}`,
@@ -1863,14 +1991,15 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   })
 
   // Теневой идеал проживает этот же месяц в тех же условиях:
-  // та же выручка за силу команды, тот же спрос, тот же простой
-  const iView = idealView(game.ideal, game.labor, game.demand)
+  // та же выручка за силу команды, тот же спрос, тот же простой,
+  // тот же кризис своей командой
   const iRev = round10k(REVENUE_BASE * DEMAND_MODES[game.demand].revenueMult * livePower(iView))
   const iPay = payroll(liveCabinet(iView), game.ideal.roster)
   const iOpex = round10k(OPEX_BASE * DEMAND_MODES[game.demand].opexMult)
   const iFine = liveVacancyFine(iView)
-  const idealCash = Math.max(0, game.ideal.cash + iRev - iPay - iOpex - iFine)
-  const idealValue = liveValue(iView).total
+  const idealCash = Math.max(0, game.ideal.cash + iRev - iPay - iOpex - iFine + iCrisisCash)
+  const idealValueShift = (game.ideal.valueShift ?? 0) + iCrisisValue
+  const idealValue = liveValue({ ...iView, valueShift: idealValueShift }).total
   const idealPct = idealValue > 0 ? Math.round((value / idealValue) * 100) : 100
   events.push(idealPct >= 100
     ? { text: `🥇 Идеал в этих условиях: ${fmtValue(idealValue)} — вы опережаете линию идеального управления!`, kind: 'good' }
@@ -1885,6 +2014,7 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const log: MonthLog = {
     month: game.month, demand: game.demand, revenue, opex,
     payroll: pay, vacancyFine: fine, net, value, valueDelta, left, events,
+    crisis: crisisLog,
   }
   const history = [...game.history, log]
   const month = game.month + 1
@@ -1912,6 +2042,7 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
     roster: game.ideal.roster,
     history: [...game.ideal.history, { month: game.month, value: idealValue }],
     moves: game.ideal.moves,
+    valueShift: idealValueShift,
   }
   // Сотрудники определяются по креслам — самый надёжный источник истины.
   // (Раньше здесь вычищали ещё и «совпавших со скамейкой» — из-за этого
@@ -2011,6 +2142,7 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const interim: LiveGame = {
     ...game, month, cash, labor, demand, slots, roster: rosterNow, bench: [],
     history, promotions, promotionsDone: game.promotionsDone,
+    valueShift: valueShiftNow, lastCrisis: crisis ? crisis.id : null,
   }
   const fresh = finished ? [] : newBench(interim)
   // Идеал тут же делает свои ходы в новом месяце — линия всегда на месяц впереди игрока по решениям
