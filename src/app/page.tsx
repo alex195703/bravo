@@ -14,7 +14,7 @@
 // ============================================================
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { TYPES, type QuadraId } from '@/lib/socionics-data'
+import { TYPES, QUADRAS, type QuadraId } from '@/lib/socionics-data'
 import { QUADRA_COLORS } from '@/lib/relations'
 import { typeByRu, label } from '@/lib/socionics-quiz'
 import {
@@ -24,11 +24,14 @@ import {
   normalizeCandidate, DEMAND_MODES, LIVE_MONTHS,
   SEVERANCE_MONTHS, SIGNING_BONUS_MONTHS,
   newLiveGame, liveValue, liveRevenue, liveVacancyFine, liveCabinet,
-  hireCost, hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
+  hireCandidate, fireEmployee, closeMonth, liveGrade, vacancyFineFor,
   teamVsIdeal, idealCompare,
+  companyProfile, assignPreview, promoteEmployee, promoteCost,
+  PROMO_GRACE_MONTHS, FUNCTIONS,
   type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
-  type MarketMode, type Candidate, type HireCost,
+  type MarketMode, type Candidate,
   type IdealState, type SlotState, type IdealCompare, type IdealLinePoint,
+  type PromotionRequest, type AssignmentPreview, type CompanyProfile,
 } from '@/lib/bravo'
 
 type Phase = 'intro' | 'manage' | 'final'
@@ -150,7 +153,23 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
     const startValue = Number(parsed.startValue) > 0 ? Number(parsed.startValue) : 0
     const ideal = restoreIdeal(parsed)
     if (!ideal) return null
-    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal }
+    // Запросы карьерного роста: в старых сохранениях их нет — считаем, что их и не было
+    const promotions = Array.isArray(parsed.promotions)
+      ? (parsed.promotions as Partial<PromotionRequest>[])
+        .filter((pr) => pr && typeof pr.ru === 'string' &&
+          roster.some((c) => c.ru === pr.ru) &&
+          Number.isFinite(Number(pr.since)) &&
+          typeof pr.wantedPost === 'string' && POSTS.some((p) => p.id === pr.wantedPost))
+        .map((pr) => ({
+          ru: String(pr.ru),
+          since: Math.max(1, Math.floor(Number(pr.since))),
+          wantedPost: String(pr.wantedPost),
+        }))
+      : []
+    const promotionsDone = Number.isFinite(Number(parsed.promotionsDone))
+      ? Math.max(0, Math.floor(Number(parsed.promotionsDone)))
+      : 0
+    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal, promotions, promotionsDone }
   } catch {
     return null
   }
@@ -165,6 +184,8 @@ export default function BravoSimulator() {
   const [isNewBest, setIsNewBest] = useState(false)
   const [intl, setIntl] = useState(false)
   const [speed, setSpeed] = useState(0)
+  // Карьерный рост: выбранное кресло для повышения (пусто — панель свёрнута)
+  const [promoTarget, setPromoTarget] = useState('')
   const hydrated = useRef(false)
 
   // Читаем сохранённую партию после монтирования (иначе гидратация расходится)
@@ -214,6 +235,19 @@ export default function BravoSimulator() {
   const idealInfo = cab && game ? teamVsIdeal(cab, game.roster) : null
   // Линия идеального управления: теневой управляющий против игрока
   const cmp = useMemo(() => (game ? idealCompare(game) : null), [game])
+  // Профиль компании: компетенции + соционика (для панели ниже)
+  const profile = useMemo(() => (game ? companyProfile(game) : null), [game])
+  // Карьерный рост: активный запрос и выбранная цель повышения
+  const promoReq = game && game.promotions.length > 0 ? game.promotions[0] : null
+  const promoCand = promoReq && game ? game.roster.find((c) => c.ru === promoReq.ru) ?? null : null
+  const promoFromPost = promoReq && game
+    ? POSTS.find((p) => game.slots[p.id]?.ru === promoReq.ru) ?? null
+    : null
+  const promoWantedPost = promoReq ? POSTS.find((p) => p.id === promoReq.wantedPost) ?? null : null
+  const promoPv = game && promoReq && promoTarget ? assignPreview(game, promoReq.ru, promoTarget) : null
+  const promoMonthsLeft = game && promoReq
+    ? Math.max(1, PROMO_GRACE_MONTHS - (game.month - promoReq.since))
+    : 0
   const benchStar = game && cab
     ? game.bench
       .map((ru) => game.roster.find((c) => c.ru === ru))
@@ -224,6 +258,7 @@ export default function BravoSimulator() {
     setGame(newLiveGame())
     setNote(null)
     setSel(null)
+    setPromoTarget('')
     setIsNewBest(false)
     setPhase('manage')
   }
@@ -234,6 +269,14 @@ export default function BravoSimulator() {
     setGame(res.game)
     setNote(res.event)
     setSel(null)
+  }
+
+  function doPromote(ru: string, postId: string): void {
+    if (!game) return
+    const res = promoteEmployee(game, ru, postId)
+    setGame(res.game)
+    setNote(res.event)
+    setPromoTarget('')
   }
 
   function doFire(postId: string): void {
@@ -249,6 +292,7 @@ export default function BravoSimulator() {
     setGame(res.game)
     setNote(null)
     setSel(null)
+    setPromoTarget('')
     if (res.finished) {
       const last = res.game.history[res.game.history.length - 1]
       const record = { value: last.value, growth: last.value - res.game.startValue }
@@ -313,6 +357,14 @@ export default function BravoSimulator() {
         text: 'Рядом с вами играет теневой суперуправленец: принял ту же сеть и живёт в тех же условиях, но ходит без ошибок. Его линия на графике — ваша цель; догоните её, а если повезёт — обгоните!',
       },
       {
+        emoji: '🧬', title: 'Профиль компании и анализ назначения',
+        text: 'Каждое назначение меняет и компетентностный, и соционический профиль сети. Перед ходом — анализ «до → после»: сильные функции, квадры, сплочённость и стоимость в гривнах, плюс совпадение кандидата с эталоном кресла.',
+      },
+      {
+        emoji: '🚀', title: 'Карьерный рост',
+        text: 'Сильные люди растут: сотрудник может попросить большее кресло. Повысите — его старое кресло опустеет: вакансия рождается и из повышения! Проигнорируете два месяца — человек уйдёт к конкурентам.',
+      },
+      {
         emoji: '⏱', title: 'Скорость моделирования',
         text: 'Не ждите месяц за месяцем по кнопке: включите автопилот 🐢/▶/⏩ — месяцы закроются сами. Пауза — чтобы думать; выбор кандидата ставит автопилот на паузу.',
       },
@@ -363,6 +415,8 @@ export default function BravoSimulator() {
               <li>🕳 Пустое кресло <b>капает каждый месяц</b>: штраф кассе растёт со временем простоя, а стоимость компании теряет {fmtValue(VACANCY_VALUE_PENALTY)} за каждую вакансию.</li>
               <li>🌤 Конъюнктура гуляет: спрос покупателей и рынок труда меняются каждый месяц — выручка то растёт, то проседает.</li>
               <li>🎯 У каждой должности есть эталон — сравнивайте штат с идеалом в панели «Эталон».</li>
+              <li>🧬 Перед каждым назначением — анализ «до → после»: компетенции, соционика, сплочённость и стоимость сети.</li>
+              <li>🚀 Карьерный рост: повышение рождает вакансию на старом кресле; нереагированный запрос — уход к конкурентам.</li>
               <li>🥇 Линия идеального управления: теневой управляющий играет те же условия без ошибок — его линия растёт на графике рядом с вашей.</li>
               <li>🦸 Раз в несколько месяцев на рынок может выйти суперуправленец — эталон во плоти, но в 1,45 раза дороже рынка.</li>
               <li>⏱ Автопилот закрывает месяцы сам: год проматывается за полминуты, пауза — чтобы думать.</li>
@@ -587,6 +641,9 @@ export default function BravoSimulator() {
               {starsHired > 0 && (
                 <> · 🦸 суперуправленцев в штате: <b className="text-slate-700">{starsHired}</b></>
               )}
+              {game.promotionsDone > 0 && (
+                <> · 🚀 карьерных повышений: <b className="text-slate-700">{game.promotionsDone}</b></>
+              )}
             </p>
           )}
 
@@ -785,6 +842,64 @@ export default function BravoSimulator() {
           </details>
         )}
 
+        {/* Профиль компании: компетентностный и соционический слепок сети */}
+        {profile && (
+          <details className="rounded-2xl bg-white p-4 shadow-sm border border-slate-200 mb-4">
+            <summary className="cursor-pointer select-none font-semibold text-slate-800">
+              🧬 Профиль компании — компетенции и соционика{' '}
+              <b className={profile.avgFit >= 75 ? 'text-emerald-700' : profile.avgFit >= 55 ? 'text-amber-600' : 'text-rose-600'}>
+                {profile.avgFit}%
+              </b>{' '}средний итог
+              <span className="ml-2 text-xs font-normal text-slate-400">нажмите, чтобы развернуть</span>
+            </summary>
+            <p className="mt-2 text-sm text-slate-500">
+              Каждое назначение меняет профиль сети целиком. Средние по {profile.filled} занятым креслам:
+              итог {profile.avgFit}% · профпригодность {profile.avgProf}% · соционика {profile.avgSoc}%.
+            </p>
+            <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Сильные функции команды (топ-2 модели А)
+            </p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {profile.functions.map((f) => (
+                <span
+                  key={f.fn}
+                  title={FUNCTIONS[f.fn].name}
+                  className={`rounded-md border px-2 py-0.5 text-xs font-medium ${
+                    f.strong >= 2
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : f.strong === 1
+                        ? 'bg-sky-50 text-sky-700 border-sky-200'
+                        : 'bg-slate-50 text-slate-400 border-slate-200'
+                  }`}
+                >
+                  {f.fn} · {f.strong}
+                </span>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Число — сколько сотрудников держат аспект в топ-2 функции. Кризисы спрашивают именно эти мышцы.
+            </p>
+            <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Квадры</p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {(Object.keys(profile.quadras) as QuadraId[]).map((q) => (
+                <span key={q} className={`rounded-md border px-2 py-0.5 text-xs ${quadraChip(q)}`}>
+                  {QUADRAS[q].name}: {profile.quadras[q]}
+                </span>
+              ))}
+            </div>
+            {profile.quadraImbalance && (
+              <p className="mt-1 text-xs font-medium text-amber-700">⚖️ {profile.quadraImbalance}</p>
+            )}
+            {profile.duals.length > 0 && (
+              <p className="mt-1 text-xs text-emerald-700">🤝 Дуальные пары: {profile.duals.join(', ')}</p>
+            )}
+            {profile.conflicts.length > 0 && (
+              <p className="mt-1 text-xs text-rose-700">⚡ Конфликтные пары: {profile.conflicts.join(', ')}</p>
+            )}
+            <p className="mt-2 text-xs text-slate-400">Сплочённость команды: {profile.cohesion}%.</p>
+          </details>
+        )}
+
         {/* Последнее кадровое решение */}
         {note && (
           <div
@@ -877,6 +992,47 @@ export default function BravoSimulator() {
           })}
         </div>
 
+        {/* Карьерный рост: активный запрос сотрудника */}
+        {promoReq && promoCand && promoFromPost && (
+          <section aria-label="Карьерный рост" className="rounded-2xl border-2 border-sky-300 bg-sky-50 p-4 mb-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-semibold text-sky-900">🚀 Карьерный рост: {promoCand.name} ({promoCand.ru})</h2>
+              <span className="rounded-lg border border-sky-400 bg-white px-3 py-1 text-xs font-bold text-sky-800">
+                уйдёт к конкурентам через {promoMonthsLeft} мес
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-sky-900">
+              Сейчас — «{promoFromPost.title}» (итог {overallFit(promoCand, promoFromPost)}%).
+              {promoWantedPost && <> Просит «{promoWantedPost.title}» (там итог {overallFit(promoCand, promoWantedPost)}%).</>}
+              {' '}Повышение освободит старое кресло — вакансия родится из карьерного роста; отказ — потеря человека насовсем.
+            </p>
+            <select
+              aria-label={`Куда повысить ${promoCand.name}`}
+              value={promoTarget}
+              onChange={(e) => {
+                // Начали решать — автопилот встаёт на паузу
+                if (e.target.value && speed !== 0) setSpeed(0)
+                setPromoTarget(e.target.value)
+              }}
+              className="mt-2 w-full max-w-sm rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            >
+              <option value="">— куда повысить? —</option>
+              {POSTS.filter((p) => p.id !== promoFromPost.id).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.emoji} {p.title} · {game.slots[p.id].ru ? 'замена' : 'вакансия'} · итог {overallFit(promoCand, p)}%
+                </option>
+              ))}
+            </select>
+            {promoPv && promoReq && (
+              <AssignmentPreviewCard
+                pv={promoPv}
+                confirmLabel="🚀 Повысить →"
+                onConfirm={() => doPromote(promoReq.ru, promoTarget)}
+              />
+            )}
+          </section>
+        )}
+
         {/* Экстренная новость: на рынке суперуправленец */}
         {benchStar && (
           <div className="rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 mb-4" role="status">
@@ -902,8 +1058,8 @@ export default function BravoSimulator() {
             const t = typeByRu(c.ru)
             const field = POSTS.find((p) => p.id === c.profession)?.field ?? c.profession
             const selPost = sel && sel.ru === c.ru ? POSTS.find((p) => p.id === sel.postId) ?? null : null
-            const plan: HireCost | null = selPost ? hireCost(game, c.ru, selPost.id) : null
-            const fit = selPost ? overallFit(c, selPost) : 0
+            // Анализ ДО назначения: рейтинги, деньги и изменение профиля компании
+            const pv: AssignmentPreview | null = selPost ? assignPreview(game, c.ru, selPost.id) : null
             return (
               <article key={ru} className={`rounded-2xl p-4 shadow-sm flex flex-col ${c.super ? 'bg-amber-50 border-2 border-amber-400' : 'bg-white border border-slate-200'}`}>
                 <div className="flex flex-wrap items-center gap-2">
@@ -952,31 +1108,12 @@ export default function BravoSimulator() {
                     )
                   })}
                 </select>
-                {selPost && plan && (
-                  <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-sm">
-                    <div className={`inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2.5 py-1 ${fitBadgeClass(fit)}`}>
-                      <b>{fitStars(fit)}</b>
-                      <span>итог {fit}%</span>
-                      <span className="text-xs opacity-70">
-                        проф {profFit(c, selPost)}% · соционика {postFit(t, selPost)}%
-                      </span>
-                    </div>
-                    <p className="mt-1.5 text-slate-600">
-                      Подъёмные: <b>{fmtMoney(plan.bonus)}</b>
-                      {plan.replacing && <> · секверанс: <b>{fmtMoney(plan.severance)}</b></>}
-                      {' '}· всего из кассы: <b className="text-slate-800">{fmtMoney(plan.total)}</b>
-                    </p>
-                    {plan.ok ? (
-                      <button
-                        onClick={() => doHire(c.ru, selPost.id)}
-                        className="mt-2 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
-                      >
-                        Предложить работу →
-                      </button>
-                    ) : (
-                      <p className="mt-2 text-sm font-medium text-rose-600">{plan.reason}</p>
-                    )}
-                  </div>
+                {selPost && pv && (
+                  <AssignmentPreviewCard
+                    pv={pv}
+                    confirmLabel="Предложить работу →"
+                    onConfirm={() => doHire(c.ru, pv.post.id)}
+                  />
                 )}
               </article>
             )
@@ -1075,6 +1212,125 @@ export default function BravoSimulator() {
 function quadraChip(q: QuadraId): string {
   const c = QUADRA_COLORS[q]
   return `${c.fill} ${c.text} border-slate-200`
+}
+
+const QUADRA_LABEL: Record<QuadraId, string> = {
+  alpha: 'Альфа', beta: 'Бета', gamma: 'Гамма', delta: 'Дельта',
+}
+
+/** Квадры: только изменившиеся, строкой «Гамма 2→3» */
+function quadraDeltaText(before: Record<QuadraId, number>, after: Record<QuadraId, number>): string[] {
+  return (Object.keys(before) as QuadraId[])
+    .filter((q) => before[q] !== after[q])
+    .map((q) => `${QUADRA_LABEL[q]} ${before[q]}→${after[q]}`)
+}
+
+/**
+ * Анализ назначения ДО хода: рейтинги кандидата против эталона,
+ * деньги хода — и как изменится профиль компании: стоимость,
+ * сплочённость, ФОТ, квадры, сильные функции, связи с коллегами.
+ */
+function AssignmentPreviewCard({ pv, confirmLabel, onConfirm }: {
+  pv: AssignmentPreview
+  confirmLabel: string
+  onConfirm: () => void
+}) {
+  const valueDelta = pv.valueAfter - pv.valueBefore
+  const quadraChanges = quadraDeltaText(pv.quadrasBefore, pv.quadrasAfter)
+  const socParts: string[] = []
+  if (quadraChanges.length > 0) socParts.push(`Квадры: ${quadraChanges.join(', ')}`)
+  if (pv.fnChanges.length > 0) {
+    socParts.push(`Сильные функции: ${pv.fnChanges.map((f) => `${f.fn} ${f.before}→${f.after}`).join(', ')}`)
+  }
+  const tense = pv.relations.filter((r) => r.tense).slice(0, 3)
+  const friendly = pv.relations
+    .filter((r) => !r.tense && (r.kind === 'дуальность' || r.kind === 'активация' || r.kind === 'деловые'))
+    .slice(0, 2)
+  return (
+    <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2.5 py-1 ${fitBadgeClass(pv.fit)}`}>
+          <b>{fitStars(pv.fit)}</b>
+          <span>итог {pv.fit}%</span>
+          <span className="text-xs opacity-70">проф {pv.prof}% · соционика {pv.soc}%</span>
+        </span>
+        <span className="text-xs text-slate-500">
+          эталон кресла: {pv.idealFit}% · совпадение <b className="text-slate-700">{pv.pctOfIdeal}%</b>
+        </span>
+      </div>
+
+      {/* Профиль компании: до → после */}
+      <div className="mt-2 grid gap-x-4 gap-y-0.5 sm:grid-cols-2">
+        <p className="text-slate-600">
+          💰 Стоимость: {fmtValue(pv.valueBefore)} →{' '}
+          <b className={valueDelta >= 0 ? 'text-emerald-700' : 'text-rose-600'}>{fmtValue(pv.valueAfter)}</b>{' '}
+          ({signedMoney(valueDelta)})
+        </p>
+        <p className="text-slate-600">
+          🤝 Сплочённость: {pv.cohesionBefore}% →{' '}
+          <b className={pv.cohesionAfter >= pv.cohesionBefore ? 'text-emerald-700' : 'text-rose-600'}>{pv.cohesionAfter}%</b>
+        </p>
+        <p className="text-slate-600">📊 Средний итог штата: {pv.avgFitBefore}% → {pv.avgFitAfter}%</p>
+        <p className="text-slate-600">💼 ФОТ: {fmtMoney(pv.payrollBefore)} → {fmtMoney(pv.payrollAfter)}/мес</p>
+      </div>
+
+      {/* Деньги хода */}
+      {pv.promotion ? (
+        <p className="mt-1.5 text-slate-600">
+          🚀 Внутренний переход — подъёмных нет · новый оклад: <b>{fmtMoney(pv.salaryAfter)}/мес</b>
+          {pv.severance > 0 && <> · секверанс снятому: <b>{fmtMoney(pv.severance)}</b></>}
+        </p>
+      ) : (
+        <p className="mt-1.5 text-slate-600">
+          Подъёмные: <b>{fmtMoney(pv.bonus)}</b>
+          {pv.severance > 0 && <> · секверанс: <b>{fmtMoney(pv.severance)}</b></>}
+          {' '}· всего из кассы: <b className="text-slate-800">{fmtMoney(pv.total)}</b>
+        </p>
+      )}
+      {pv.displaced && (
+        <p className="mt-1 text-xs text-slate-500">
+          Кресло займёт место {pv.displaced.name} — выплачивается секверанс {SEVERANCE_MONTHS} оклада
+        </p>
+      )}
+      {pv.freeingPost && (
+        <p className="mt-1 text-xs font-medium text-amber-700">
+          ⚠️ Освободится «{pv.freeingPost.title}» — там начнётся простой: вакансия рождается и из повышения
+        </p>
+      )}
+
+      {/* Соционический профиль: до → после */}
+      {socParts.length > 0 ? (
+        <p className="mt-1 text-slate-600">🧬 {socParts.join(' · ')}</p>
+      ) : (
+        <p className="mt-1 text-xs text-slate-400">
+          🧬 Соционический профиль сети не изменится: квадры и сильные функции те же
+        </p>
+      )}
+      {tense.length > 0 ? (
+        <p className="mt-1 text-rose-700">
+          ⚡ Напряжённые связи: {tense.map((r) => `${r.kind} — ${r.name} (${r.postTitle})`).join(' · ')}
+        </p>
+      ) : (
+        <p className="mt-1 text-xs text-emerald-700">⚡ Конфликтных связей с будущими коллегами нет</p>
+      )}
+      {friendly.length > 0 && (
+        <p className="mt-0.5 text-xs text-emerald-700">
+          🤝 Сильные союзы: {friendly.map((r) => `${r.kind} — ${r.name} (${r.postTitle})`).join(' · ')}
+        </p>
+      )}
+
+      {pv.ok ? (
+        <button
+          onClick={onConfirm}
+          className="mt-2 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500"
+        >
+          {confirmLabel}
+        </button>
+      ) : (
+        <p className="mt-2 text-sm font-medium text-rose-600">{pv.reason}</p>
+      )}
+    </div>
+  )
 }
 
 /**
