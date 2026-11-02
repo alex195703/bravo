@@ -9,6 +9,9 @@
 // и рынка труда, скамейка кандидатов, которая уходит в конце
 // месяца. Прокрастинация наказуема: вакансии капают деньгами,
 // а счёт игры — стоимость компании в миллионах гривен.
+// Кабинет министров (2.5): кризисы приходят из реальных портфелей
+// украинского правительства — разведка предупреждает, а сеть
+// лоббирует встречи через интертипные отношения с министрами.
 // Логика и данные — в src/lib/bravo.ts, здесь только React.
 // Прогресс хранится в localStorage.
 // ============================================================
@@ -28,10 +31,15 @@ import {
   teamVsIdeal, idealCompare,
   companyProfile, assignPreview, promoteEmployee, promoteCost,
   PROMO_GRACE_MONTHS, FUNCTIONS, CRISIS_BASELINE,
+  CRISES, requestLobby, cancelLobby, LOBBY_COST, lobbyBonusFor,
+  ministerForPortfolio, ministerDemandBias, portfolioTitle,
+  currentCabinet, crisesOfPortfolio, newGovernmentState, politicianById,
+  CABINET_ALTERNATIVES, CABINET_PRESIDENT, RESHUFFLE_MONTH,
   type LiveGame, type MonthLog, type MonthEvent, type DemandMode,
   type MarketMode, type Candidate, type CrisisLog,
   type IdealState, type SlotState, type IdealCompare, type IdealLinePoint,
   type PromotionRequest, type AssignmentPreview, type CompanyProfile,
+  type GovernmentState, type LobbyRequest,
 } from '@/lib/bravo'
 
 type Phase = 'intro' | 'manage' | 'final'
@@ -117,6 +125,42 @@ function restoreIdeal(parsed: Partial<LiveGame>): IdealState | null {
   return { cash, slots, roster, history, moves, valueShift }
 }
 
+/**
+ * Кабинет министров из сохранения: старые сейвы не знают про gov —
+ * считаем, что кабинет дефолтный и разведка спит.
+ */
+function restoreGov(parsed: Partial<LiveGame>, roster: Candidate[]): GovernmentState {
+  const base = newGovernmentState()
+  const g = parsed.gov as Partial<GovernmentState> | undefined
+  if (!g || typeof g !== 'object') return base
+  const sponsors = { ...base.sponsors }
+  if (g.sponsors && typeof g.sponsors === 'object') {
+    for (const key of Object.keys(base.sponsors)) {
+      const pid = (g.sponsors as Record<string, unknown>)[key]
+      if (typeof pid === 'string' && politicianById(pid)) sponsors[key] = pid
+    }
+  }
+  let lobby: LobbyRequest | null = null
+  if (g.lobby && typeof g.lobby === 'object') {
+    const l = g.lobby as Partial<LobbyRequest>
+    if (
+      typeof l.ru === 'string' && roster.some((c) => c.ru === l.ru) &&
+      typeof l.portfolio === 'string' && !!sponsors[l.portfolio] &&
+      Number.isFinite(Number(l.cost)) && Number(l.cost) > 0
+    ) {
+      lobby = { portfolio: l.portfolio, ru: l.ru, cost: Number(l.cost) }
+    }
+  }
+  const pendingCrisis =
+    typeof g.pendingCrisis === 'string' && CRISES.some((c) => c.id === g.pendingCrisis)
+      ? g.pendingCrisis
+      : null
+  const changes = Array.isArray(g.changes)
+    ? g.changes.filter((x): x is string => typeof x === 'string')
+    : []
+  return { sponsors, lobby, pendingCrisis, reshuffled: g.reshuffled === true, changes }
+}
+
 /** Восстановление партии из сохранения: битые данные отбрасываем */
 function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
   try {
@@ -173,7 +217,8 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
     // Кризисы (2.4): в старых сохранениях репутации нет — считаем, что кризисов не было
     const valueShift = Number.isFinite(Number(parsed.valueShift)) ? Number(parsed.valueShift) : 0
     const lastCrisis = typeof parsed.lastCrisis === 'string' ? parsed.lastCrisis : null
-    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal, promotions, promotionsDone, valueShift, lastCrisis }
+    const gov = restoreGov(parsed, roster)
+    return { month: Math.floor(month), cash, labor, demand, slots, roster, bench, history, startValue, ideal, promotions, promotionsDone, valueShift, lastCrisis, gov }
   } catch {
     return null
   }
@@ -190,6 +235,8 @@ export default function BravoSimulator() {
   const [speed, setSpeed] = useState(0)
   // Карьерный рост: выбранное кресло для повышения (пусто — панель свёрнута)
   const [promoTarget, setPromoTarget] = useState('')
+  // Кабинет министров: выбранный лоббист (до нажатия кнопки)
+  const [lobbyPick, setLobbyPick] = useState('')
   const hydrated = useRef(false)
 
   // Читаем сохранённую партию после монтирования (иначе гидратация расходится)
@@ -258,11 +305,39 @@ export default function BravoSimulator() {
       .find((c) => c?.super) ?? null
     : null
 
+  // Кабинет министров: разведка месяца и лоббирование (2.5)
+  const pendingCrisisId = game && game.gov.pendingCrisis ? game.gov.pendingCrisis : null
+  const pendingCrisis = pendingCrisisId ? CRISES.find((c) => c.id === pendingCrisisId) ?? null : null
+  const pendingMinister = game && pendingCrisis
+    ? ministerForPortfolio(game.gov, pendingCrisis.sponsor)
+    : null
+  const cabinetMinisters = game ? currentCabinet(game.gov) : []
+  const lobbyInfo = game?.gov.lobby ?? null
+  const lobbyCand = game && lobbyInfo ? game.roster.find((c) => c.ru === lobbyInfo.ru) ?? null : null
+  const lobbyMinister = game && lobbyInfo ? ministerForPortfolio(game.gov, lobbyInfo.portfolio) : null
+  const lobbyScore = lobbyCand && lobbyMinister ? lobbyBonusFor(typeByRu(lobbyCand.ru), lobbyMinister) : null
+  const lobbyPickScore = game && lobbyPick && pendingMinister
+    ? lobbyBonusFor(typeByRu(lobbyPick), pendingMinister)
+    : null
+  const staffOptions = useMemo(() => {
+    if (!game || !pendingMinister) return []
+    const opts = POSTS
+      .map((p) => {
+        const ru = game.slots[p.id]?.ru
+        const emp = ru ? game.roster.find((c) => c.ru === ru) ?? null : null
+        if (!emp) return null
+        return { emp, post: p, lb: lobbyBonusFor(typeByRu(emp.ru), pendingMinister) }
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+    return opts.sort((a, b) => b.lb.bonus - a.lb.bonus)
+  }, [game, pendingMinister])
+
   function acceptCompany(): void {
     setGame(newLiveGame())
     setNote(null)
     setSel(null)
     setPromoTarget('')
+    setLobbyPick('')
     setIsNewBest(false)
     setPhase('manage')
   }
@@ -290,6 +365,21 @@ export default function BravoSimulator() {
     setNote(res.event)
   }
 
+  function doLobby(ru: string): void {
+    if (!game || !pendingCrisis) return
+    const res = requestLobby(game, ru, pendingCrisis.sponsor)
+    setGame(res.game)
+    setNote(res.event)
+    setLobbyPick('')
+  }
+
+  function doCancelLobby(): void {
+    if (!game) return
+    const res = cancelLobby(game)
+    setGame(res.game)
+    setNote(res.event)
+  }
+
   function doClose(): void {
     if (!game || game.month > LIVE_MONTHS) return
     const res = closeMonth(game)
@@ -297,6 +387,7 @@ export default function BravoSimulator() {
     setNote(null)
     setSel(null)
     setPromoTarget('')
+    setLobbyPick('')
     if (res.finished) {
       const last = res.game.history[res.game.history.length - 1]
       const record = { value: last.value, growth: last.value - res.game.startValue }
@@ -373,6 +464,10 @@ export default function BravoSimulator() {
         text: 'Мир не ждёт: сорванная поставка, проверка, вставшие кассы приходят сами. Исход решает команда — тип × квалификация × должность × кризис: у каждого испытания свои функции и свои кресла. Справитесь — премия кассе и стоимости, провал — ущерб. Провал в одном кризисе — выигрыш в другом, и кризис гнёт даже линию идеала.',
       },
       {
+        emoji: '🏛', title: 'Кабинет министров',
+        text: 'Кризисы приносят реальные украинские министерства: у каждого кризиса — портфель-спонсор, а тип-версия министра добавляет кризису личный запрос. Разведка предупреждает заранее: отправьте сотрудника с подходящим типом на лоббистскую встречу — дуал министра договорится, конфликтник насорит. В середине года — политический сезон: возможны перестановки в Кабмине.',
+      },
+      {
         emoji: '⏱', title: 'Скорость моделирования',
         text: 'Не ждите месяц за месяцем по кнопке: включите автопилот 🐢/▶/⏩ — месяцы закроются сами. Пауза — чтобы думать; выбор кандидата ставит автопилот на паузу.',
       },
@@ -429,6 +524,7 @@ export default function BravoSimulator() {
               <li>🦸 Раз в несколько месяцев на рынок может выйти суперуправленец — эталон во плоти, но в 1,45 раза дороже рынка.</li>
               <li>⏱ Автопилот закрывает месяцы сам: год проматывается за полминуты, пауза — чтобы думать.</li>
               <li>🌪 Кризисы приходят сами: исход = тип × квалификация × должность × кризис. Справились выше порога — премия, ниже — ущерб кассе и стоимости; кризис гнёт и линию идеала.</li>
+              <li>🏛 Кабинет министров: кризисы приходят из реальных портфелей — следите за разведкой и лоббируйте встречи: тип сотрудника против тип-версии министра; в середине года возможны перестановки.</li>
               <li>🏆 Финал: сколько миллионов гривен вы добавили к стоимости сети — это ваш счёт и рекорд.</li>
             </ul>
           </section>
@@ -972,6 +1068,183 @@ export default function BravoSimulator() {
           </details>
         )}
 
+        {/* Кабинет министров: политический слой кризисов (2.5) */}
+        {game && (
+          <details
+            className={`rounded-2xl p-4 shadow-sm border mb-4 ${
+              pendingMinister ? 'bg-amber-50 border-amber-300' : 'bg-white border-slate-200'
+            }`}
+          >
+            <summary className="cursor-pointer select-none font-semibold text-slate-800">
+              🏛 Кабинет министров —{' '}
+              {pendingMinister
+                ? <span className="text-amber-700">⚡ разведка: {pendingMinister.name} готовит решение</span>
+                : 'месяц без правительственных решений'}
+              <span className="ml-2 text-xs font-normal text-slate-400">нажмите, чтобы развернуть</span>
+            </summary>
+
+            {/* Разведка месяца + лоббирование */}
+            {pendingMinister && pendingCrisis ? (
+              <div className="mt-3 rounded-xl border border-amber-300 bg-white p-3.5">
+                <p className="text-sm text-slate-700">
+                  Разведка: <b>{pendingMinister.name}</b> ({pendingMinister.role}) готовит решение по портфелю
+                  «{portfolioTitle(pendingCrisis.sponsor)}» — тип-версия <b>{pendingMinister.typeRu}</b>{' '}
+                  ({label(typeByRu(pendingMinister.typeRu), intl)}, {pendingMinister.note}).
+                </p>
+                <p className="mt-1 text-sm text-slate-600">
+                  Возможное испытание: <b>{pendingCrisis.emoji} {pendingCrisis.title}</b>. Кресла:{' '}
+                  {pendingCrisis.involved.map((id) => POSTS.find((p) => p.id === id)?.title ?? id).join(', ')}.
+                  Запрос министра: <b>{ministerDemandBias(pendingMinister)}</b>{' '}
+                  ({FUNCTIONS[ministerDemandBias(pendingMinister)].name}).
+                </p>
+                {!lobbyInfo ? (
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    <select
+                      value={lobbyPick}
+                      onChange={(e) => setLobbyPick(e.target.value)}
+                      aria-label="Кого отправить на встречу с министром"
+                      className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-700"
+                    >
+                      <option value="">— кого отправить на встречу —</option>
+                      {staffOptions.map((o) => (
+                        <option key={o.emp.ru} value={o.emp.ru}>
+                          {o.emp.name} ({o.emp.ru}) · «{o.lb.kind}» {o.lb.bonus >= 0 ? '+' : ''}{o.lb.bonus}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      disabled={!lobbyPick || game.cash < LOBBY_COST}
+                      onClick={() => lobbyPick && doLobby(lobbyPick)}
+                      className="rounded-lg bg-sky-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      🤝 Назначить встречу (−{fmtMoney(LOBBY_COST)})
+                    </button>
+                    {lobbyPickScore && (
+                      <span className={`text-xs ${lobbyPickScore.bonus > 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+                        «{lobbyPickScore.kind}» → {lobbyPickScore.bonus >= 0 ? '+' : ''}{lobbyPickScore.bonus} к решению кризиса
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2 text-sm">
+                    <span className="rounded-md border border-sky-300 bg-sky-50 px-2 py-0.5 font-medium text-sky-800">
+                      🤝 Встреча назначена: {lobbyCand ? `${lobbyCand.name} (${lobbyCand.ru})` : '—'} →{' '}
+                      {lobbyMinister?.name ?? '—'}
+                      {lobbyScore ? ` · «${lobbyScore.kind}» ${lobbyScore.bonus >= 0 ? '+' : ''}${lobbyScore.bonus}` : ''}
+                    </span>
+                    <button
+                      onClick={doCancelLobby}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                    >
+                      Отменить (вернуть {fmtMoney(lobbyInfo.cost)})
+                    </button>
+                  </div>
+                )}
+                <p className="mt-1.5 text-xs text-slate-400">
+                  Встреча сработает, только если кризис придёт из этого портфеля. Отношения лоббиста с тип-версией
+                  министра решают всё: дуал добавит до +15, конфликтник отнимет 5. Одна встреча в месяц.
+                </p>
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">
+                🌤 Разведка спит: Кабмин не готовит решений по сети — можно спокойно копить силы.
+              </p>
+            )}
+
+            {/* Действующий кабинет */}
+            <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Действующий кабинет (утверждён Радой 16.07.2026)
+            </p>
+            <div className="mt-2 grid gap-2.5 sm:grid-cols-2">
+              {cabinetMinisters.map((m) => (
+                <article
+                  key={m.id}
+                  className={`rounded-xl border p-3 ${
+                    pendingMinister?.id === m.id ? 'border-amber-400 bg-amber-50' : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    <p className="font-semibold text-slate-800">{m.name}</p>
+                    <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+                      {m.typeRu} · {label(typeByRu(m.typeRu), intl)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">{m.role}</p>
+                  <p className="text-xs text-slate-400">{m.note}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">{m.bio}</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Портфель «{portfolioTitle(m.portfolio ?? '')}» · кризисы:{' '}
+                    {crisesOfPortfolio(m.portfolio ?? '').map((c) => `${c.emoji} ${c.title}`).join(' · ') || '—'}
+                  </p>
+                </article>
+              ))}
+            </div>
+
+            {/* Президент: фон политического поля */}
+            <div className="mt-2.5 rounded-xl border border-slate-200 bg-white p-3">
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <p className="font-semibold text-slate-800">{CABINET_PRESIDENT.name}</p>
+                <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+                  {CABINET_PRESIDENT.typeRu} · {label(typeByRu(CABINET_PRESIDENT.typeRu), intl)}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">{CABINET_PRESIDENT.role}</p>
+              <p className="text-xs text-slate-400">{CABINET_PRESIDENT.note}</p>
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">{CABINET_PRESIDENT.bio}</p>
+            </div>
+
+            {/* Политическая погода: проверяемые факты */}
+            <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Политическая погода — факты (ноябрь 2026)
+            </p>
+            <ul className="mt-1.5 space-y-1 text-xs leading-relaxed text-slate-500">
+              <li>• Кабмин июля 2026: после отставки правительства Свыриденко премьером стал Сергей Корецкий.</li>
+              <li>• Военное положение продлено до 29.01.2027 (21-е продление): выборы не назначены — возможны после его отмены.</li>
+              <li>• Опрос «Рейтинга» (октябрь 2026): в первом туре президентских выборов лидируют Зеленский и Залужный.</li>
+              <li>• Месяц {RESHUFFLE_MONTH} — политический сезон: с шансом 55% портфели уходят политикам из альтернативного пула.</li>
+            </ul>
+
+            {/* Возможные конфигурации: альтернативный пул */}
+            <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Возможные конфигурации: альтернативный пул
+            </p>
+            <div className="mt-2 grid gap-2.5 sm:grid-cols-2">
+              {CABINET_ALTERNATIVES.map((m) => (
+                <article key={m.id} className="rounded-xl border border-dashed border-slate-300 bg-white p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    <p className="font-semibold text-slate-800">{m.name}</p>
+                    <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+                      {m.typeRu} · {label(typeByRu(m.typeRu), intl)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">{m.role}</p>
+                  <p className="text-xs text-slate-400">{m.note}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">{m.bio}</p>
+                </article>
+              ))}
+            </div>
+
+            {/* Журнал перестановок */}
+            {game.gov.changes.length > 0 && (
+              <>
+                <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Журнал Кабмина</p>
+                <ul className="mt-1.5 space-y-1 text-xs text-slate-500">
+                  {game.gov.changes.map((ch, i) => (
+                    <li key={i}>• {ch}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            <p className="mt-4 text-xs leading-relaxed text-slate-400">
+              Персонажи — реальные публичные политики; досье собраны из открытых источников (июль—октябрь 2026).
+              Соционические типы — версии: для части фигур есть типирования сообщества (typuvannia.info,
+              социофорумы), остальные — авторские игровые версии. Игровые эффекты — условность симуляции,
+              а не характеристика или оценка реальных людей.
+            </p>
+          </details>
+        )}
+
         {/* Последнее кадровое решение */}
         {note && (
           <div
@@ -1300,7 +1573,9 @@ function CrisisCard({ c, month, intl }: { c: CrisisLog; month: number; intl: boo
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="font-semibold text-slate-800">
           <span aria-hidden>{c.emoji}</span> {c.title}
-          <span className="ml-2 text-xs font-normal text-slate-400">кризис месяца {month}</span>
+          <span className="ml-2 text-xs font-normal text-slate-400">
+            кризис месяца {month}{c.sponsorName ? ` · решение: ${c.sponsorName}` : ''}
+          </span>
         </p>
         <span className="flex items-center gap-2 text-sm">
           <b className={scoreClass}>вы: {c.score}%</b>
@@ -1309,6 +1584,11 @@ function CrisisCard({ c, month, intl }: { c: CrisisLog; month: number; intl: boo
         </span>
       </div>
       <p className="mt-1.5 text-sm text-slate-600">{c.narrative}</p>
+      {c.lobbyBonus ? (
+        <p className={`mt-0.5 text-sm ${c.lobbyBonus > 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+          🤝 Лоббист: {c.lobbyBonus > 0 ? '+' : ''}{c.lobbyBonus} к решению · отношения «{c.lobbyKind}»
+        </p>
+      ) : null}
       <p className="mt-1.5 text-sm">
         <span className={c.cashImpact >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
           💵 касса {c.cashImpact >= 0 ? '+' : '−'}{fmtMoney(Math.abs(c.cashImpact))}
