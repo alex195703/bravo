@@ -431,6 +431,14 @@ export default function BravoSimulator() {
             >
               🏢 Принять сеть
             </button>
+            <a
+              href="/puls-seti-demo.mp4"
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-base font-semibold text-slate-700 shadow-sm transition-colors hover:bg-slate-100"
+            >
+              🎬 Как играть — демо 2:03
+            </a>
             {best && (
               <span className="text-sm text-slate-500">
                 Рекорд сценария: <b>{fmtValue(best.value)}</b>{' '}
