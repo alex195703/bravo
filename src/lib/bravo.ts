@@ -18,12 +18,12 @@
 // ============================================================
 
 import {
-  type SocioType, type FunctionId,
+  type SocioType, type FunctionId, type QuadraId,
   TYPES, FUNCTIONS, QUADRAS,
 } from './socionics-data'
 import { typeByRu, modelA, shuffle } from './socionics-quiz'
 import {
-  relationBetween, PAIR_SCORE,
+  relationBetween, PAIR_SCORE, RELATION_CATEGORY,
   type RelationKind,
 } from './relations'
 
@@ -1131,6 +1131,10 @@ export interface LiveGame {
   startValue: number
   /** теневой идеальный управляющий — источник линии идеала */
   ideal: IdealState
+  /** открытые запросы на карьерный рост (сейчас не больше одного) */
+  promotions: PromotionRequest[]
+  /** сколько повышений сделал игрок за год */
+  promotionsDone: number
 }
 
 /**
@@ -1280,6 +1284,8 @@ export function newLiveGame(): LiveGame {
     history: [],
     startValue: 0,
     ideal: { cash: LIVE_CASH_START, slots: {}, roster: [], history: [], moves: [] },
+    promotions: [],
+    promotionsDone: 0,
   }
   const benchCandidates = newBench(game)
   game.roster = [...roster, ...benchCandidates]
@@ -1347,7 +1353,15 @@ export function hireCandidate(game: LiveGame, ru: string, postId: string): LiveA
   // Кандидат больше не на рынке — он сотрудник: убираем со скамейки
   const bench = game.bench.filter((x) => x !== ru)
   const slots = { ...game.slots, [postId]: { ru, vacantMonths: 0 } }
-  const next: LiveGame = { ...game, cash: game.cash - cost.total, slots, roster, bench }
+  const next: LiveGame = {
+    ...game,
+    cash: game.cash - cost.total,
+    slots,
+    roster,
+    bench,
+    // снятый с кресла мог оставить незакрытый запрос на рост — он уходит вместе с ним
+    promotions: game.promotions.filter((pr) => pr.ru !== oldRu),
+  }
   const text = cand.super
     ? `🦸 «${post.title}» принимает эталон: ${cand.name} (${cand.ru}) за ${fmtMoney(cand.salary)}/мес — подъёмные ${fmtMoney(cost.bonus)}. Команда шагнула к мечте`
     : cost.replacing && old
@@ -1370,6 +1384,8 @@ export function fireEmployee(game: LiveGame, postId: string): LiveActionResult {
     cash: game.cash - severance,
     slots: { ...game.slots, [postId]: { ru: null, vacantMonths: 0 } },
     roster: game.roster.filter((c) => c.ru !== old.ru),
+    // уволенный мог оставить незакрытый запрос на рост — он уходит вместе с ним
+    promotions: game.promotions.filter((pr) => pr.ru !== old.ru),
   }
   return {
     game: next,
@@ -1426,6 +1442,9 @@ export function idealMoves(
     return best
   }
   const hire = (postId: string, c: Candidate, fit: number, replacing: boolean): void => {
+    // один человек не может занять два кресла за один месяц:
+    // лучший кандидат бывает лучшим сразу для нескольких должностей
+    if (taken.has(c.ru)) return
     if (cur.cash < idealCost(cur, c, postId)) return
     const oldRu = cur.slots[postId]?.ru ?? null
     const old = replacing && oldRu ? cur.roster.find((e) => e.ru === oldRu) : null
@@ -1454,6 +1473,7 @@ export function idealMoves(
   }
   // 2. Замены: слабых и переоплаченных — под заметно лучших
   const swaps: { postId: string; c: Candidate; fit: number; gain: number }[] = []
+  const swapTaken = new Set<string>()
   for (const post of POSTS) {
     const ru = cur.slots[post.id]?.ru
     if (!ru) continue
@@ -1461,10 +1481,12 @@ export function idealMoves(
     if (!old) continue
     const best = bestFor(post.id)
     if (!best) continue
+    if (swapTaken.has(best.c.ru)) continue // одного кандидата не предлагаем двум креслам
     const curFit = overallFit(old, post)
     const gain = best.fit - curFit
     if (best.c.super ? gain >= 5 : gain >= IDEAL_SWAP_GAIN) {
       swaps.push({ postId: post.id, c: best.c, fit: best.fit, gain })
+      swapTaken.add(best.c.ru)
     }
   }
   swaps.sort((a, b) => b.gain - a.gain)
@@ -1487,6 +1509,319 @@ export function idealCompare(game: LiveGame): IdealCompare {
   })
   const pct = idealValue > 0 ? Math.round((playerValue / idealValue) * 100) : 100
   return { idealValue, playerValue, pct, gap: idealValue - playerValue, line, moves: game.ideal.moves }
+}
+
+// ---------- ПРОФИЛЬ КОМПАНИИ И КАРЬЕРНЫЙ РОСТ ----------
+//
+// Отзыв игрока: «каждое назначение меняет как компетентностный,
+// так и соционический профиль компании в целом. Надо добавить их
+// анализ перед возможным назначением, тогда игрок может сразу
+// видеть их несовершенство. Вакансии появляются не только в связи
+// с уходом сотрудника, но и в связи с переходом старого сотрудника
+// на новую позицию — карьерный рост». Отсюда:
+//
+//   • companyProfile — слепок сети: компетентностный профиль
+//     (средние проф/соц/итог по креслам) и соционический (носители
+//     сильных функций, квадры, конфликтные и дуальные пары);
+//   • assignPreview — анализ назначения ДО хода: как изменятся
+//     профили и стоимость компании, чем кандидат не дотягивает
+//     до эталона кресла, с кем сработается, а с кем столкнётся;
+//   • PromotionRequest — запрос на карьерный рост: сильный
+//     сотрудник просит большее кресло. Повышение рождает вакансию
+//     на старом месте (каскад), отказ — уход к конкурентам.
+
+/** Запрос сотрудника на карьерный рост */
+export interface PromotionRequest {
+  /** кто просит (ru — ключ человека) */
+  ru: string
+  /** месяц, в котором появился запрос */
+  since: number
+  /** должность, на которую человек хочет (сильнейшее свободное от него кресло) */
+  wantedPost: string
+}
+
+/** Шанс, что в месяце появится запрос на карьерный рост */
+export const PROMO_CHANCE = 0.22
+/** Сколько месяцев компания может думать, пока человек не ушёл к конкурентам */
+export const PROMO_GRACE_MONTHS = 2
+/** Минимальный итог на желаемом кресле, чтобы человек просил роста */
+export const PROMO_MIN_FIT = 60
+/** На сколько итог на желаемом кресле должен превышать текущий */
+export const PROMO_STEP_GAIN = 10
+/** Прибавка к окладу при повышении (внутренний переход дешевле найма) */
+export const PROMO_SALARY_RAISE = 1.1
+/** Выигрыш в итоге, при котором идеал сразу повышает человека */
+export const IDEAL_PROMO_GAIN = 8
+
+/** Носители аспекта: сколько сотрудников держат его в топ-2 модели А */
+export interface FunctionCoverage { fn: FunctionId; strong: number }
+
+/** Слепок компании: компетентностный и соционический профили */
+export interface CompanyProfile {
+  /** занятых кресел */
+  filled: number
+  /** всего кресел */
+  posts: number
+  /** средняя профпригодность занятых, % */
+  avgProf: number
+  /** средняя соционика занятых, % */
+  avgSoc: number
+  /** средний итог занятых, % */
+  avgFit: number
+  /** соционика: носители сильных функций (топ-2 модели А) */
+  functions: FunctionCoverage[]
+  /** соционика: сотрудники по квадрам */
+  quadras: Record<QuadraId, number>
+  /** предупреждение о перекосе квадр (или null) */
+  quadraImbalance: string | null
+  /** конфликтные пары штата */
+  conflicts: string[]
+  /** дуальные пары штата */
+  duals: string[]
+  /** сплочённость, % */
+  cohesion: number
+}
+
+const ALL_FNS: FunctionId[] = Object.keys(FUNCTIONS) as FunctionId[]
+
+/**
+ * Профиль компании «как есть сейчас»: и компетентностный (средние
+ * по креслам), и соционический (функции, квадры, пары отношений).
+ * Тот же слепок используется в анализе до назначения — до и после.
+ */
+export function companyProfile(game: LiveCore): CompanyProfile {
+  const employees: { c: Candidate; post: Post }[] = []
+  for (const p of POSTS) {
+    const ru = game.slots[p.id]?.ru
+    const c = ru ? game.roster.find((x) => x.ru === ru) ?? null : null
+    if (c) employees.push({ c, post: p })
+  }
+  const n = employees.length
+  const avgProf = n ? Math.round(employees.reduce((s, e) => s + profFit(e.c, e.post), 0) / n) : 0
+  const avgSoc = n ? Math.round(employees.reduce((s, e) => s + postFit(typeByRu(e.c.ru), e.post), 0) / n) : 0
+  const avgFit = n ? Math.round(employees.reduce((s, e) => s + overallFit(e.c, e.post), 0) / n) : 0
+  const functions: FunctionCoverage[] = ALL_FNS.map((fn) => ({
+    fn,
+    strong: employees.filter((e) => functionPosition(typeByRu(e.c.ru), fn) <= 2).length,
+  }))
+  const quadras: Record<QuadraId, number> = { alpha: 0, beta: 0, gamma: 0, delta: 0 }
+  for (const e of employees) quadras[typeByRu(e.c.ru).quadra]++
+  let quadraImbalance: string | null = null
+  if (n >= 4) {
+    const top = (Object.entries(quadras) as [QuadraId, number][]).sort((a, b) => b[1] - a[1])[0]
+    if (top && top[1] >= Math.max(3, Math.ceil(n * 0.6))) {
+      quadraImbalance =
+        `${top[1]} из ${n} сотрудников из квадры «${QUADRAS[top[0]].name}»: комфортно, но слепые зоны гарантированы`
+    }
+  }
+  const types = employees.map((e) => typeByRu(e.c.ru))
+  const conflicts: string[] = []
+  const duals: string[] = []
+  for (let i = 0; i < types.length; i++) {
+    for (let j = i + 1; j < types.length; j++) {
+      const rel = relationBetween(types[i], types[j])
+      if (rel.kind === 'конфликт') conflicts.push(`${types[i].ru} — ${types[j].ru}`)
+      if (rel.kind === 'дуальность') duals.push(`${types[i].ru} + ${types[j].ru}`)
+    }
+  }
+  return {
+    filled: n, posts: POSTS.length, avgProf, avgSoc, avgFit,
+    functions, quadras, quadraImbalance, conflicts, duals,
+    cohesion: cohesion(liveCabinet(game)),
+  }
+}
+
+/** Анализ назначения ДО хода: что этот ход сделает с компанией */
+export interface AssignmentPreview {
+  /** кандидат (со скамейки — найм или из штата — повышение) */
+  cand: Candidate
+  /** целевая должность */
+  post: Post
+  /** true — повышение своего сотрудника, false — найм со скамейки */
+  promotion: boolean
+  /** подъёмные, грн (только при найме) */
+  bonus: number
+  /** секверанс снятого, грн */
+  severance: number
+  /** всего из кассы, грн */
+  total: number
+  /** денег хватает, ход возможен */
+  ok: boolean
+  /** почему ход невозможен */
+  reason: string
+  /** итог кандидата на должности, % */
+  fit: number
+  /** профпригодность кандидата на должности, % */
+  prof: number
+  /** соционика кандидата на должности, % */
+  soc: number
+  /** итог эталона этой должности, % */
+  idealFit: number
+  /** совпадение с эталоном, % */
+  pctOfIdeal: number
+  /** стоимость компании до → после, грн */
+  valueBefore: number
+  valueAfter: number
+  /** сплочённость до → после, % */
+  cohesionBefore: number
+  cohesionAfter: number
+  /** средний итог штата до → после, % */
+  avgFitBefore: number
+  avgFitAfter: number
+  /** ФОТ до → после, грн/мес */
+  payrollBefore: number
+  payrollAfter: number
+  /** оклад кандидата после назначения (повышение — с прибавкой) */
+  salaryAfter: number
+  /** квадры: до → после */
+  quadrasBefore: Record<QuadraId, number>
+  quadrasAfter: Record<QuadraId, number>
+  /** изменившиеся сильные функции: было → стало носителей */
+  fnChanges: { fn: FunctionId; before: number; after: number }[]
+  /** отношения кандидата с будущими коллегами (напряжённые — первыми) */
+  relations: { name: string; postTitle: string; kind: RelationKind; tense: boolean }[]
+  /** при повышении: кресло, которое освободится */
+  freeingPost: Post | null
+  /** при замене: кого снимаем */
+  displaced: { name: string; postTitle: string } | null
+}
+
+/**
+ * Посчитать назначение «на бумаге», не делая хода: ru может быть
+ * кандидатом со скамейки (найм) или сотрудником в кресле (повышение).
+ * Показывает несовершенство человека против эталона и то, как ход
+ * изменит компетентностный и соционический профиль компании целиком.
+ */
+export function assignPreview(game: LiveGame, ru: string, postId: string): AssignmentPreview | null {
+  const cand = game.roster.find((c) => c.ru === ru)
+  const post = POSTS.find((p) => p.id === postId)
+  if (!cand || !post) return null
+  const curPost = POSTS.find((p) => game.slots[p.id]?.ru === ru) ?? null
+  const promotion = !!curPost
+  if (promotion && curPost.id === postId) return null
+  const displacedRu = game.slots[postId]?.ru ?? null
+  const displaced = displacedRu ? game.roster.find((c) => c.ru === displacedRu) ?? null : null
+  const bonus = promotion ? 0 : cand.salary * SIGNING_BONUS_MONTHS
+  const severance = displaced ? displaced.salary * SEVERANCE_MONTHS : 0
+  const total = bonus + severance
+  const ok = game.cash >= total
+  const reason = ok
+    ? ''
+    : `В кассе ${fmtMoney(game.cash)} — не хватает на кадровые выплаты ${fmtMoney(total)}`
+  const fit = overallFit(cand, post)
+  const prof = profFit(cand, post)
+  const soc = postFit(typeByRu(cand.ru), post)
+  const idealFit = overallFit(idealCandidate(post), post)
+  const salaryAfter = promotion
+    ? Math.round(
+        (Math.max(cand.salary, salaryFor(prof, cand.years, post.id)) * PROMO_SALARY_RAISE) / 1000,
+      ) * 1000
+    : cand.salary
+  const before = companyProfile(game)
+  const valueBefore = liveValue(game).total
+  const payrollBefore = payroll(liveCabinet(game), game.roster)
+  const slotsAfter: Record<string, SlotState> = { ...game.slots }
+  if (promotion && curPost) {
+    slotsAfter[curPost.id] = { ru: null, vacantMonths: 0 }
+  }
+  slotsAfter[post.id] = { ru, vacantMonths: 0 }
+  const rosterAfter = game.roster
+    .filter((c) => c.ru !== displacedRu)
+    .map((c) => (c.ru === ru ? { ...c, salary: salaryAfter } : c))
+  const after: LiveCore = { slots: slotsAfter, roster: rosterAfter, labor: game.labor, demand: game.demand }
+  const afterProfile = companyProfile(after)
+  const valueAfter = liveValue(after).total
+  const fnChanges = before.functions
+    .map((f) => {
+      const nextFn = afterProfile.functions.find((x) => x.fn === f.fn)
+      return { fn: f.fn, before: f.strong, after: nextFn ? nextFn.strong : f.strong }
+    })
+    .filter((f) => f.before !== f.after)
+  const relations = POSTS
+    .filter((p) => p.id !== post.id)
+    .map((p) => {
+      const otherRu = slotsAfter[p.id]?.ru ?? null
+      const other = otherRu ? game.roster.find((c) => c.ru === otherRu) ?? null : null
+      if (!other || other.ru === ru) return null
+      const kind = relationBetween(typeByRu(cand.ru), typeByRu(other.ru)).kind
+      return { name: other.name, postTitle: p.title, kind, tense: RELATION_CATEGORY[kind] === 'tense' }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+  relations.sort((a, b) => (b.tense ? 1 : 0) - (a.tense ? 1 : 0))
+  return {
+    cand, post, promotion, bonus, severance, total, ok, reason,
+    fit, prof, soc, idealFit,
+    pctOfIdeal: idealFit > 0 ? Math.round((fit / idealFit) * 100) : 0,
+    valueBefore, valueAfter,
+    cohesionBefore: before.cohesion, cohesionAfter: afterProfile.cohesion,
+    avgFitBefore: before.avgFit, avgFitAfter: afterProfile.avgFit,
+    payrollBefore, payrollAfter: payroll(liveCabinet(after), rosterAfter),
+    salaryAfter,
+    quadrasBefore: before.quadras, quadrasAfter: afterProfile.quadras,
+    fnChanges, relations,
+    freeingPost: promotion ? curPost : null,
+    displaced: displaced ? { name: displaced.name, postTitle: post.title } : null,
+  }
+}
+
+/** Повышение своего сотрудника: цена хода (без подъёмных — это внутренний переход) */
+export function promoteCost(game: LiveGame, ru: string, postId: string): HireCost {
+  const curPost = POSTS.find((p) => game.slots[p.id]?.ru === ru)
+  const post = POSTS.find((p) => p.id === postId)
+  const displacedRu = post ? game.slots[post.id]?.ru ?? null : null
+  const displaced = displacedRu ? game.roster.find((c) => c.ru === displacedRu) ?? null : null
+  const severance = displaced && displacedRu !== ru ? displaced.salary * SEVERANCE_MONTHS : 0
+  let ok = false
+  let reason = ''
+  if (!curPost) reason = 'Этого человека нет в штате'
+  else if (!post) reason = 'Должность не найдена'
+  else if (curPost.id === postId) reason = 'Человек уже занимает это кресло'
+  else if (game.cash < severance) {
+    reason = `В кассе ${fmtMoney(game.cash)} — не хватает на секверанс ${fmtMoney(severance)}`
+  } else ok = true
+  return { bonus: 0, severance, total: severance, replacing: !!displaced, ok, reason }
+}
+
+/**
+ * Повысить своего сотрудника: старое кресло освобождается — вакансия
+ * рождается из карьерного роста. Целевое кресло можно освободить,
+ * заплатив секверанс; оклад повышающегося растёт (не меньше прежнего).
+ */
+export function promoteEmployee(game: LiveGame, ru: string, postId: string): LiveActionResult {
+  const cost = promoteCost(game, ru, postId)
+  const curPost = POSTS.find((p) => game.slots[p.id]?.ru === ru)
+  const post = POSTS.find((p) => p.id === postId)
+  const cand = game.roster.find((c) => c.ru === ru)
+  if (!cost.ok || !curPost || !post || !cand) {
+    return { game, event: { text: cost.reason || 'Повышение не состоялось', kind: 'bad' } }
+  }
+  const displacedRu = game.slots[post.id]?.ru ?? null
+  const displaced = displacedRu ? game.roster.find((c) => c.ru === displacedRu) ?? null : null
+  const salary = Math.round(
+    (Math.max(cand.salary, salaryFor(profFit(cand, post), cand.years, post.id)) * PROMO_SALARY_RAISE) / 1000,
+  ) * 1000
+  const roster = game.roster
+    .filter((c) => c.ru !== displacedRu)
+    .map((c) => (c.ru === ru ? { ...c, salary } : c))
+  const slots: Record<string, SlotState> = {
+    ...game.slots,
+    [curPost.id]: { ru: null, vacantMonths: 0 },
+    [post.id]: { ru, vacantMonths: 0 },
+  }
+  const next: LiveGame = {
+    ...game,
+    cash: game.cash - cost.total,
+    slots,
+    roster,
+    promotions: game.promotions.filter((pr) => pr.ru !== ru),
+    promotionsDone: game.promotionsDone + 1,
+  }
+  const text =
+    `🚀 Карьерный рост: ${cand.name} (${cand.ru}) переходит «${curPost.title}» → «${post.title}», ` +
+    `оклад ${fmtMoney(salary)}/мес` +
+    (displaced ? `, ${displaced.name} уходит (секверанс ${fmtMoney(cost.total)})` : '') +
+    `. Освободилось «${curPost.title}» — простой начался`
+  return { game: next, event: { text, kind: 'good' } }
 }
 
 /** Закрыть месяц: обороты, простой, стоимость — и время идёт дальше */
@@ -1556,10 +1891,10 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   const finished = month > LIVE_MONTHS
 
   // Кресла простаивают дальше, ушедшие кандидаты исчезают навсегда
-  const slots: Record<string, SlotState> = {}
+  const agedSlots: Record<string, SlotState> = {}
   for (const p of POSTS) {
     const s = game.slots[p.id]
-    slots[p.id] = s && !s.ru
+    agedSlots[p.id] = s && !s.ru
       ? { ru: null, vacantMonths: s.vacantMonths + 1 }
       : { ru: s?.ru ?? null, vacantMonths: 0 }
   }
@@ -1571,7 +1906,7 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
       ? { ru: null, vacantMonths: s.vacantMonths + 1 }
       : { ru: s?.ru ?? null, vacantMonths: 0 }
   }
-  const idealState: IdealState = {
+  const idealBase: IdealState = {
     cash: idealCash,
     slots: idealSlots,
     roster: game.ideal.roster,
@@ -1582,18 +1917,116 @@ export function closeMonth(game: LiveGame): { game: LiveGame; finished: boolean 
   // (Раньше здесь вычищали ещё и «совпавших со скамейкой» — из-за этого
   // дубль типа ломал состав: сотрудника удалял выход звёзды с тем же типом.)
   const employeeRus = new Set(
-    POSTS.map((p) => slots[p.id]?.ru).filter((x): x is string => !!x),
+    POSTS.map((p) => agedSlots[p.id]?.ru).filter((x): x is string => !!x),
   )
   const employeesOnly = game.roster.filter((c) => employeeRus.has(c.ru))
+
+  // ---------- КАРЬЕРНЫЙ РОСТ ----------
+  // Просроченные запросы: человек не дождался повышения и уходит
+  // к конкурентам. Вакансия рождается сама — без секверанса, но
+  // с простоем и потерей стоимости.
+  const promoEvents: MonthEvent[] = []
+  let slots = agedSlots
+  let rosterNow = employeesOnly
+  let promotions: PromotionRequest[] = []
+  for (const pr of game.promotions) {
+    if (month - pr.since < PROMO_GRACE_MONTHS) {
+      promotions.push(pr)
+      continue
+    }
+    const seatPost = POSTS.find((p) => slots[p.id]?.ru === pr.ru)
+    const person = rosterNow.find((c) => c.ru === pr.ru)
+    if (!seatPost || !person) continue // человека уже нет в штате — запрос истёк сам
+    slots = { ...slots, [seatPost.id]: { ru: null, vacantMonths: 0 } }
+    rosterNow = rosterNow.filter((c) => c.ru !== pr.ru)
+    promoEvents.push({
+      text: `🚪 ${person.name} (${person.ru}) уходит к конкурентам: ${PROMO_GRACE_MONTHS} мес ждал повышения и не дождался. Освободилось «${seatPost.title}» — простой начался`,
+      kind: 'bad',
+    })
+  }
+  // Новый запрос на рост: сильный сотрудник просит большее кресло.
+  let idealState = idealBase
+  const promoMoveTexts: string[] = []
+  if (!finished && promotions.length === 0) {
+    const eligible = POSTS
+      .map((p) => {
+        const seatRu = slots[p.id]?.ru
+        const c = seatRu ? rosterNow.find((x) => x.ru === seatRu) ?? null : null
+        if (!c || c.super) return null
+        const fit = overallFit(c, p)
+        const wanted = bestPostForCandidate(c)
+        // рост = реальный шаг вверх: есть кресло, где от человека заметно больше толку
+        if (wanted.post.id === p.id || wanted.fit < PROMO_MIN_FIT || wanted.fit - fit < PROMO_STEP_GAIN) return null
+        return { c, post: p, fit, wanted }
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+    if (eligible.length > 0 && Math.random() < PROMO_CHANCE) {
+      const pick = eligible[Math.floor(Math.random() * eligible.length)]
+      promotions = [{ ru: pick.c.ru, since: month, wantedPost: pick.wanted.post.id }]
+      promoEvents.push({
+        text: `🚀 Карьерный рост: ${pick.c.name} (${pick.c.ru}) из «${pick.post.title}» просит большего — хочет «${pick.wanted.post.title}» (итог там ${pick.wanted.fit}% против ${pick.fit}% сейчас). ${PROMO_GRACE_MONTHS} мес на решение, иначе уйдёт к конкурентам`,
+        kind: 'neutral',
+      })
+      // Теневой идеал: тот же человек в его компании решается сразу —
+      // повысить, если это окупается, или отпустить без сожалений.
+      const iSeat = POSTS.find((p) => idealState.slots[p.id]?.ru === pick.c.ru) ?? null
+      const iCand = idealState.roster.find((c) => c.ru === pick.c.ru) ?? null
+      if (iSeat && iCand && pick.wanted.post.id !== iSeat.id) {
+        const gain = pick.wanted.fit - overallFit(iCand, iSeat)
+        const keepWorthy = overallFit(iCand, iSeat) >= 70
+        const iDispRu = idealState.slots[pick.wanted.post.id]?.ru ?? null
+        const iDisp = iDispRu ? idealState.roster.find((c) => c.ru === iDispRu) ?? null : null
+        const iCost = iDisp ? iDisp.salary * SEVERANCE_MONTHS : 0
+        if ((gain >= IDEAL_PROMO_GAIN || keepWorthy) && idealState.cash >= iCost) {
+          const iSalary = Math.round(
+            (Math.max(iCand.salary, salaryFor(profFit(iCand, pick.wanted.post), iCand.years, pick.wanted.post.id)) * PROMO_SALARY_RAISE) / 1000,
+          ) * 1000
+          idealState = {
+            ...idealState,
+            cash: idealState.cash - iCost,
+            slots: {
+              ...idealState.slots,
+              [iSeat.id]: { ru: null, vacantMonths: 0 },
+              [pick.wanted.post.id]: { ru: iCand.ru, vacantMonths: 0 },
+            },
+            roster: idealState.roster
+              .filter((c) => c.ru !== iDispRu)
+              .map((c) => (c.ru === iCand.ru ? { ...c, salary: iSalary } : c)),
+          }
+          promoMoveTexts.push(`повышает ${iCand.name}: «${iSeat.title}» → «${pick.wanted.post.title}»${iDisp ? `, ${iDisp.name} уходит` : ''}`)
+        } else {
+          idealState = {
+            ...idealState,
+            slots: { ...idealState.slots, [iSeat.id]: { ru: null, vacantMonths: 0 } },
+            roster: idealState.roster.filter((c) => c.ru !== iCand.ru),
+          }
+          promoMoveTexts.push(`теряет ${iCand.name} («${iSeat.title}») — повышение окупилось бы слабо, отпустил сразу`)
+        }
+      }
+    }
+  }
+
   const labor: MarketMode = finished ? game.labor : rollLabor()
   const demand: DemandMode = finished ? game.demand : rollDemand()
-  const interim: LiveGame = { ...game, month, cash, labor, demand, slots, roster: employeesOnly, bench: [], history }
+  const interim: LiveGame = {
+    ...game, month, cash, labor, demand, slots, roster: rosterNow, bench: [],
+    history, promotions, promotionsDone: game.promotionsDone,
+  }
   const fresh = finished ? [] : newBench(interim)
   // Идеал тут же делает свои ходы в новом месяце — линия всегда на месяц впереди игрока по решениям
-  const idealNext = finished
+  let idealNext = finished
     ? idealState
     : idealMoves(idealState, fresh, labor, demand)
-  const next: LiveGame = { ...interim, roster: [...employeesOnly, ...fresh], bench: fresh.map((c) => c.ru), ideal: idealNext }
+  // карьерные ходы идеала — тоже ходы месяца (idealMoves начинает список заново)
+  if (promoMoveTexts.length > 0) {
+    idealNext = { ...idealNext, moves: [...promoMoveTexts, ...idealNext.moves] }
+  }
+  const next: LiveGame = { ...interim, roster: [...rosterNow, ...fresh], bench: fresh.map((c) => c.ru), ideal: idealNext }
+  // Карьерные новости — тоже события месяца
+  if (promoEvents.length > 0) {
+    const lastLog = next.history[next.history.length - 1]
+    for (const ev of promoEvents) lastLog.events.push(ev)
+  }
   // Выход суперуправленца — событие месяца: мимо такой новости пройти нельзя
   const star = fresh.find((c) => c.super)
   if (star) {
