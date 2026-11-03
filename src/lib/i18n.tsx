@@ -1,28 +1,25 @@
 'use client'
 
 // ============================================================
-// ДВОМОВНИЙ ШАР: українська (за замовчуванням) та російська.
+// ДВОМОВНИЙ ШАР: українська (завжди перша) та російська.
 //   L(uk, ru)  — вибрати рядок за поточною мовою (у компонентах)
 //   <Bi>       — тип двомовного поля в даних { uk, ru }
-// Мова зберігається в localStorage та URL (?lang=ru), змінюється
-// перемикачем у шапці. Зміна мови перемальовує всі компоненти,
-// підписані на useLang().
+// Джерело мови — лише адреса: без ?lang сайт ЗАВЖДИ відкривається
+// українською; ?lang=ru (пряме посилання або перемикач у шапці)
+// дає російську і тримається в адресі вкладки. Зміна мови
+// перемальовує всі компоненти, підписані на useLang().
 // ============================================================
 
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
 
 export type Lang = 'uk' | 'ru'
 
-const STORAGE_KEY = 'bravo-lang'
-
 let current: Lang = 'uk'
 
 if (typeof window !== 'undefined') {
   try {
     const fromUrl = new URL(window.location.href).searchParams.get('lang')
-    const saved = localStorage.getItem(STORAGE_KEY)
     if (fromUrl === 'uk' || fromUrl === 'ru') current = fromUrl
-    else if (saved === 'uk' || saved === 'ru') current = saved
   } catch {
     /* приватний режим — лишається uk */
   }
@@ -38,7 +35,6 @@ export function setLang(l: Lang): void {
   current = l
   if (typeof window !== 'undefined') {
     try {
-      localStorage.setItem(STORAGE_KEY, l)
       const u = new URL(window.location.href)
       u.searchParams.set('lang', l)
       window.history.replaceState(null, '', u.toString())
