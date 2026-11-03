@@ -107,6 +107,19 @@ export function LangSwitch({ className }: { className?: string }) {
 export function useTitle(uk: string, ru: string): void {
   const lang = useLang()
   useEffect(() => {
-    document.title = lang === 'uk' ? uk : ru
+    const t = lang === 'uk' ? uk : ru
+    document.title = t
+    // Next.js/React під час гідратації відновлює <title> з metadata,
+    // перетираючи наш (прямо через DOM-вузол). Протягом короткого вікна
+    // після маунту форсуємо наш заголовок назад.
+    const obs = new MutationObserver(() => {
+      if (document.title !== t) document.title = t
+    })
+    obs.observe(document.head, { subtree: true, childList: true, characterData: true })
+    const stop = window.setTimeout(() => obs.disconnect(), 2000)
+    return () => {
+      window.clearTimeout(stop)
+      obs.disconnect()
+    }
   }, [lang, uk, ru])
 }
