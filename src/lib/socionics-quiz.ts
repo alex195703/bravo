@@ -11,7 +11,7 @@
 import type { Bi, Lang } from './i18n'
 import {
   type SocioType, type QuadraId, type FunctionId,
-  TYPES, FUNCTIONS, QUADRAS,
+  TYPES, FUNCTIONS, QUADRAS, ukAbbr,
 } from './socionics-data'
 
 // Темы викторины; «full» = все темы вперемешку
@@ -25,10 +25,10 @@ export function typeByRu(ru: string): SocioType {
   return t
 }
 
-/** Как показать тип: «ИЛЭ „Дон Кихот“» или «ILE „Don Quixote“» */
+/** Как показать тип: «ИЛЭ „Дон Кихот“» / «ІЛЕ „Дон Кіхот“» или «ILE „Don Quixote“» */
 export function label(t: SocioType, intl: boolean, lang: Lang = 'uk'): string {
   if (intl) return `${t.intl} „${t.intlName}“`
-  return `${t.ru} „${t.name[lang]}“`
+  return `${lang === 'uk' ? ukAbbr(t.ru) : t.ru} „${t.name[lang]}“`
 }
 
 /** Двуязычная подпись типа: «ИЛЭ „Дон Кихот“» / «ИЛЭ „Дон Кіхот“» */

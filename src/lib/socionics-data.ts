@@ -51,6 +51,13 @@ export const FUNCTIONS: Record<FunctionId, FunctionInfo> = {
 
 // --- Тип личности ---
 
+/** Українське написання кириличного скорочення: великі И→І, Э→Е.
+ *  Покриває типи (ИЛЭ→ІЛЕ) і функції (ЧЭ→ЧЕ). Малі «и» українських
+ *  слів не чіпає — замінюються лише великі букви. */
+export function ukAbbr(s: string): string {
+  return s.replace(/И/g, 'І').replace(/Э/g, 'Е')
+}
+
 export interface SocioType {
   ru: string       // русская аббревиатура: ИЛЭ
   intl: string     // международная: ILE

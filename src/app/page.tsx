@@ -20,7 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useL, useBi, useLang, LangSwitch, type Bi, useTitle } from '@/lib/i18n'
-import { TYPES, QUADRAS, type QuadraId } from '@/lib/socionics-data'
+import { TYPES, QUADRAS, ukAbbr, type QuadraId } from '@/lib/socionics-data'
 import { QUADRA_COLORS, RELATION_LABEL } from '@/lib/relations'
 import { typeByRu, label } from '@/lib/socionics-quiz'
 import {
@@ -269,6 +269,8 @@ export default function BravoSimulator() {
   const lang = useLang()
   const L = useL()
   const B = useBi()
+  /** Скорочення мовою інтерфейсу: ИЛЭ → ІЛЕ в українській версії */
+  const K = (s: string) => (lang === 'uk' ? ukAbbr(s) : s)
   /** Гроші поточною мовою */
   const M = (n: number): string => fmtMoney(n, lang)
   /** Текст події: нові збереження — Bi, старі — рядки */
@@ -1088,7 +1090,7 @@ export default function BravoSimulator() {
                         : 'bg-slate-50 text-slate-400 border-slate-200'
                   }`}
                 >
-                  {f.fn} · {f.strong}
+                  {K(f.fn)} · {f.strong}
                 </span>
               ))}
             </div>
@@ -1136,7 +1138,7 @@ export default function BravoSimulator() {
               <div className="mt-3 rounded-xl border border-amber-300 bg-white p-3.5">
                 <p className="text-sm text-slate-700">
                   {L('Розвідка:', 'Разведка:')} <b>{B(pendingMinister.name)}</b> ({B(pendingMinister.role)}) {L('готує рішення за портфелем', 'готовит решение по портфелю')}
-                  {' '}«{B(portfolioTitle(pendingCrisis.sponsor))}» — {L('тип-версія', 'тип-версия')} <b>{pendingMinister.typeRu}</b>{' '}
+                  {' '}«{B(portfolioTitle(pendingCrisis.sponsor))}» — {L('тип-версія', 'тип-версия')} <b>{K(pendingMinister.typeRu)}</b>{' '}
                   ({intl ? typeByRu(pendingMinister.typeRu).intlName : B(typeByRu(pendingMinister.typeRu).name)}, {B(pendingMinister.note)}).
                 </p>
                 <p className="mt-1 text-sm text-slate-600">
@@ -1214,7 +1216,7 @@ export default function BravoSimulator() {
                   <div className="flex flex-wrap items-center justify-between gap-1.5">
                     <p className="font-semibold text-slate-800">{B(m.name)}</p>
                     <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                      {m.typeRu} · {intl ? typeByRu(m.typeRu).intlName : B(typeByRu(m.typeRu).name)}
+                      {K(m.typeRu)} · {intl ? typeByRu(m.typeRu).intlName : B(typeByRu(m.typeRu).name)}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">{B(m.role)}</p>
@@ -1233,7 +1235,7 @@ export default function BravoSimulator() {
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <p className="font-semibold text-slate-800">{B(CABINET_PRESIDENT.name)}</p>
                 <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                  {CABINET_PRESIDENT.typeRu} · {intl ? typeByRu(CABINET_PRESIDENT.typeRu).intlName : B(typeByRu(CABINET_PRESIDENT.typeRu).name)}
+                  {K(CABINET_PRESIDENT.typeRu)} · {intl ? typeByRu(CABINET_PRESIDENT.typeRu).intlName : B(typeByRu(CABINET_PRESIDENT.typeRu).name)}
                 </span>
               </div>
               <p className="text-xs text-slate-500">{B(CABINET_PRESIDENT.role)}</p>
@@ -1262,7 +1264,7 @@ export default function BravoSimulator() {
                   <div className="flex flex-wrap items-center justify-between gap-1.5">
                     <p className="font-semibold text-slate-800">{B(m.name)}</p>
                     <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600">
-                      {m.typeRu} · {intl ? typeByRu(m.typeRu).intlName : B(typeByRu(m.typeRu).name)}
+                      {K(m.typeRu)} · {intl ? typeByRu(m.typeRu).intlName : B(typeByRu(m.typeRu).name)}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">{B(m.role)}</p>
@@ -1615,6 +1617,7 @@ function CrisisCard({ c, month, intl }: { c: CrisisLog; month: number; intl: boo
   const L = useL()
   const B = useBi()
   const lang = useLang()
+  const K = (s: string) => (lang === 'uk' ? ukAbbr(s) : s)
   const txt = (t: Bi | string): string => (typeof t === 'string' ? t : B(t))
   const scoreClass =
     c.score >= 80 ? 'text-emerald-700' : c.score >= CRISIS_BASELINE ? 'text-slate-800' : c.score >= 45 ? 'text-amber-600' : 'text-rose-600'
@@ -1652,12 +1655,12 @@ function CrisisCard({ c, month, intl }: { c: CrisisLog; month: number; intl: boo
       </p>
       {pulled.length > 0 && (
         <p className="mt-1.5 text-sm text-slate-600">
-          💪 {L('Витягнули:', 'Вытянули:')} {pulled.map((k) => `${B(k.postTitle)} — ${label(k.type, intl, lang)} (${k.fn} ${Math.round(k.fnWeight / 10)}/10)`).join(' · ')}
+          💪 {L('Витягнули:', 'Вытянули:')} {pulled.map((k) => `${B(k.postTitle)} — ${label(k.type, intl, lang)} (${K(k.fn)} ${Math.round(k.fnWeight / 10)}/10)`).join(' · ')}
         </p>
       )}
       {worst && (
         <p className="mt-0.5 text-sm text-slate-500">
-          😓 {L('Просів:', 'Просел:')} {B(worst.postTitle)} — {label(worst.type, intl, lang)} ({worst.fn} {Math.round(worst.fnWeight / 10)}/10, {L('проф', 'проф')} {worst.prof}%)
+          😓 {L('Просів:', 'Просел:')} {B(worst.postTitle)} — {label(worst.type, intl, lang)} ({K(worst.fn)} {Math.round(worst.fnWeight / 10)}/10, {L('проф', 'проф')} {worst.prof}%)
         </p>
       )}
       {c.score < CRISIS_BASELINE && (
@@ -1700,13 +1703,14 @@ function AssignmentPreviewCard({ pv, confirmLabel, onConfirm }: {
   const L = useL()
   const B = useBi()
   const lang = useLang()
+  const K = (s: string) => (lang === 'uk' ? ukAbbr(s) : s)
   const M = (n: number): string => fmtMoney(n, lang)
   const valueDelta = pv.valueAfter - pv.valueBefore
   const quadraChanges = quadraDeltaText(pv.quadrasBefore, pv.quadrasAfter)
   const socParts: string[] = []
   if (quadraChanges.length > 0) socParts.push(`${L('Квадри', 'Квадры')}: ${quadraChanges.join(', ')}`)
   if (pv.fnChanges.length > 0) {
-    socParts.push(`${L('Сильні функції', 'Сильные функции')}: ${pv.fnChanges.map((f) => `${f.fn} ${f.before}→${f.after}`).join(', ')}`)
+    socParts.push(`${L('Сильні функції', 'Сильные функции')}: ${pv.fnChanges.map((f) => `${K(f.fn)} ${f.before}→${f.after}`).join(', ')}`)
   }
   const tense = pv.relations.filter((r) => r.tense).slice(0, 3)
   const friendly = pv.relations
