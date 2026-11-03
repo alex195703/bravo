@@ -115,10 +115,10 @@ section('5) Должности сети «Браво»')
 check('должностей ровно 8', POSTS.length === 8)
 check('id должностей уникальны', new Set(POSTS.map((p) => p.id)).size === 8)
 check('первичная и вторичная функции различаются', POSTS.every((p) => p.primary !== p.secondary))
-check('у каждой должности есть сфера для резюме', POSTS.every((p) => p.field.length > 0))
+check('у каждой должности есть сфера для резюме', POSTS.every((p) => p.field.ru.length > 0))
 check('сферы должностей уникальны', new Set(POSTS.map((p) => p.field)).size === 8)
 check('достижения есть для каждой сферы (по 2+ варианта)',
-  POSTS.every((p) => (ACHIEVEMENTS[p.id] ?? []).length >= 2 && ACHIEVEMENTS[p.id].every((a) => a.length > 5)))
+  POSTS.every((p) => (ACHIEVEMENTS[p.id] ?? []).length >= 2 && ACHIEVEMENTS[p.id].every((a) => a.ru.length > 5)))
 const primaries = new Set(POSTS.map((p) => p.primary))
 check('как минимум 6 разных функций среди первичных', primaries.size >= 6,
   `— ${[...primaries].join(',')}`)
@@ -170,16 +170,16 @@ section('8а) Профпригодность: сфера, стаж, образо
 const finPost = POSTS.find((p) => p.id === 'fin')!
 const itPost = POSTS.find((p) => p.id === 'it')!
 const strong: Candidate = {
-  ru: 'ЛСИ', name: 'Тестовый ЛСИ', age: 45, years: 20,
-  profession: 'fin', education: 'MBA', achievement: 'тест', salary: 0, tagline: '',
+  ru: 'ЛСИ', name: { uk: 'Тестовий ЛСІ', ru: 'Тестовый ЛСИ' }, age: 45, years: 20,
+  profession: 'fin', education: 'MBA', achievement: { uk: 'тест', ru: 'тест' }, salary: 0, tagline: { uk: '', ru: '' },
 }
 check('финансист с MBA и стажем 20 лет: профпригодность к финансам = 62+18+10 = 90',
   profFit(strong, finPost) === 90, `— ${profFit(strong, finPost)}`)
 check('тот же профессионал в IT (не его сфера): 22+18+10 = 50',
   profFit(strong, itPost) === 50, `— ${profFit(strong, itPost)}`)
 const junior: Candidate = {
-  ru: 'ИЛЭ', name: 'Тестовый ИЛЭ', age: 26, years: 1,
-  profession: 'mkt', education: 'Профкурсы', achievement: 'тест', salary: 0, tagline: '',
+  ru: 'ИЛЭ', name: { uk: 'Тестовий ІЛЕ', ru: 'Тестовый ИЛЭ' }, age: 26, years: 1,
+  profession: 'mkt', education: 'Профкурсы', achievement: { uk: 'тест', ru: 'тест' }, salary: 0, tagline: { uk: '', ru: '' },
 }
 check('новичок с профкурсами не в своей сфере: 22+0.9+2 = 25',
   profFit(junior, finPost) === 25, `— ${profFit(junior, finPost)}`)
@@ -213,8 +213,9 @@ check('рыночная надбавка: IT дороже среднего, ка
 check('надбавки есть для всех 8 сфер и в границах 0.85–1.2',
   POSTS.every((p) => FIELD_PREMIUM[p.id] >= 0.85 && FIELD_PREMIUM[p.id] <= 1.2))
 check('fmtMoney: «786 тыс. грн» / «1,20 млн грн»',
-  fmtMoney(786_000) === '786 тыс. грн' && fmtMoney(1_200_000) === '1,20 млн грн',
-  `— ${fmtMoney(786_000)}, ${fmtMoney(1_200_000)}`)
+  fmtMoney(786_000, 'ru') === '786 тыс. грн' && fmtMoney(1_200_000, 'ru') === '1,20 млн грн' &&
+  fmtMoney(786_000, 'uk') === '786 тис. грн',
+  `— ${fmtMoney(786_000, 'ru')}, ${fmtMoney(1_200_000, 'ru')}`)
 {
   const pool = generateMarket('plenty')
   const team = autoAssemble(pool)
@@ -238,11 +239,11 @@ for (let iter = 0; iter < 300; iter++) {
     check(`[iter ${iter}] ${mode}: типы не повторяются`, new Set(pool.map((c) => c.ru)).size === pool.length)
     check(`[iter ${iter}] ${mode}: все типы существуют`, pool.every((c) => allRu.has(c.ru)))
     check(`[iter ${iter}] ${mode}: у всех есть имя, возраст, стаж, резюме`,
-      pool.every((c) => c.name.length > 0 && c.age >= 26 && c.age <= 55 && c.years >= 1 && c.tagline.length > 0))
+      pool.every((c) => c.name.ru.length > 0 && c.age >= 26 && c.age <= 55 && c.years >= 1 && c.tagline.ru.length > 0))
     check(`[iter ${iter}] ${mode}: профессиональное досье заполнено`,
       pool.every((c) => POSTS.some((p) => p.id === c.profession) &&
         EDUCATIONS.some((e) => e.text === c.education) &&
-        c.achievement.length > 5 && ACHIEVEMENTS[c.profession].includes(c.achievement)))
+        c.achievement.ru.length > 5 && ACHIEVEMENTS[c.profession].some((a) => a.ru === c.achievement.ru)))
     check(`[iter ${iter}] ${mode}: зарплата и профпригодность в границах (грн)`,
       pool.every((c) => c.salary >= 28_000 && c.salary <= 150_000 && c.cur === 'uah' &&
         POSTS.every((p) => profFit(c, p) >= 10 && profFit(c, p) <= 98)))
@@ -255,18 +256,18 @@ check('за 300 итераций «голодного» рынка каждый 
   droughtSeen.size === 16, `— видели ${droughtSeen.size} из 16`)
 
 section('10) Строки резюме есть для всех 16 типов')
-check('резюме заполнены для всех типов', TYPES.every((t) => (CANDIDATE_TAGLINES[t.ru] ?? '').length > 5))
+check('резюме заполнены для всех типов', TYPES.every((t) => (CANDIDATE_TAGLINES[t.ru] ?? { uk: '', ru: '' }).ru.length > 5))
 const c1 = makeCandidate(typeByRu('ЛИЭ'))
 check('makeCandidate: возраст 26–55, стаж ≥ 1', c1.age >= 26 && c1.age <= 55 && c1.years >= 1 && c1.ru === 'ЛИЭ')
 check('makeCandidate: досье заполнено (сфера, образование, достижение, зарплата в грн)',
   POSTS.some((p) => p.id === c1.profession) && c1.education.length > 0 &&
-  c1.achievement.length > 5 && c1.salary >= 30_000 && c1.cur === 'uah')
+  c1.achievement.ru.length > 5 && c1.salary >= 30_000 && c1.cur === 'uah')
 {
   const stripped = { ru: 'ЛСИ', name: 'Старое сохранение', age: 40, years: 12, tagline: 'тест' } as unknown as Candidate
   const fixed = normalizeCandidate(stripped)
   check('normalizeCandidate дозаполняет старые сохранения (стаж 12 сохранён, гривна проставлена)',
     POSTS.some((p) => p.id === fixed.profession) && fixed.education.length > 0 &&
-    fixed.achievement.length > 5 && fixed.salary >= 30_000 && fixed.years === 12 && fixed.cur === 'uah')
+    fixed.achievement.ru.length > 5 && fixed.salary >= 30_000 && fixed.years === 12 && fixed.cur === 'uah')
   // Миграция «рублёвой эпохи»: зарплата без cur пересчитывается по гривневой шкале
   const rubleEra = {
     ru: 'ЛСИ', name: 'Рублёвое сохранение', age: 40, years: 12, profession: 'fin',
@@ -339,8 +340,8 @@ section('12) Автосборка из пула')
 // ---------- 13. Кризисы ----------
 
 section('13) Бизнес-кризисы: структура и симуляция')
-check('кризисов ровно 8', CRISES.length === 8)
-check('id кризисов уникальны', new Set(CRISES.map((c) => c.id)).size === 8)
+check(`кризисов в данных: ${CRISES.length}`, CRISES.length === 11)
+check('id кризисов уникальны', new Set(CRISES.map((c) => c.id)).size === CRISES.length)
 check('все задействованные должности существуют',
   CRISES.every((c) => c.involved.every((id) => POSTS.some((p) => p.id === id))))
 check('каждая должность задействована минимум в двух кризисах',
@@ -365,14 +366,14 @@ check('в требованиях только реальные функции',
     full.contributions.every((c) => c.fnWeight > 0 && c.prof >= 10 && c.prof <= 98))
   // Вклад профессионализма: тот же состав типов, но более сильные досье — очки выше
   const strongPool: Candidate[] = teamRu.map((ru) => ({
-    ru, name: `Про ${ru}`, age: 45, years: 20,
+    ru, name: { uk: `Про ${ru}`, ru: `Про ${ru}` }, age: 45, years: 20,
     profession: POSTS.find((p) => team[p.id] === ru)!.id,
-    education: 'MBA', achievement: 'тест', salary: 110_000, tagline: '',
+    education: 'MBA', achievement: { uk: 'тест', ru: 'тест' }, salary: 110_000, tagline: { uk: '', ru: '' },
   }))
   const weakPool: Candidate[] = teamRu.map((ru, i) => ({
-    ru, name: `Новичок ${ru}`, age: 26, years: 1,
+    ru, name: { uk: `Новачок ${ru}`, ru: `Новичок ${ru}` }, age: 26, years: 1,
     profession: POSTS[(i + 3) % POSTS.length].id,
-    education: 'Профкурсы', achievement: 'тест', salary: 40_000, tagline: '',
+    education: 'Профкурсы', achievement: { uk: 'тест', ru: 'тест' }, salary: 40_000, tagline: { uk: '', ru: '' },
   }))
   const strongScores = CRISES.map((c) => simulateCrisis(team, c, strongPool).score)
   const weakScores = CRISES.map((c) => simulateCrisis(team, c, weakPool).score)
@@ -426,28 +427,28 @@ check('пустая команда: сплочённость 50', cohesion({ ...
 
   // Одна квадра — риск слепых зон
   const betaPool: Candidate[] = ['СЛЭ', 'ИЭИ', 'ЭИЭ', 'ЛСИ', 'СЛЭ', 'ИЭИ', 'ЭИЭ', 'ЛСИ'].map((ru) => ({
-    ru, name: `Кандидат ${ru}`, age: 35, years: 10,
+    ru, name: { uk: `Кандидат ${ru}`, ru: `Кандидат ${ru}` }, age: 35, years: 10,
     profession: bestPostFor(typeByRu(ru)).post.id, education: 'Профильный вуз',
-    achievement: 'тест', salary: 80_000, tagline: 'тест',
+    achievement: { uk: 'тест', ru: 'тест' }, salary: 80_000, tagline: { uk: 'тест', ru: 'тест' },
   }))
   const betaTeam = autoAssemble(betaPool)
   const betaRep = buildReport(betaTeam, {})
   check('команда из одной квадры помечена как риск',
-    betaRep.risks.some((r) => r.includes('одной квадры')), `— ${betaRep.risks.join(' | ')}`)
+    betaRep.risks.some((r) => r.ru.includes('одной квадры')), `— ${betaRep.risks.map((r) => r.ru).join(' | ')}`)
 
   // Две оси найма: сильные досье дают комплимент профпригодности
   // (команда собирается вручную: каждый — в своей профессиональной сфере)
   const proTypes = ['ЛИЭ', 'ЭСИ', 'ЛСИ', 'СЛЭ', 'ИЭИ', 'ИЛИ', 'ЭИЭ', 'СЛИ']
   const proPool: Candidate[] = proTypes.map((ru, i) => ({
-    ru, name: `Про ${ru}`, age: 45, years: 20,
+    ru, name: { uk: `Про ${ru}`, ru: `Про ${ru}` }, age: 45, years: 20,
     profession: POSTS[i]!.id, education: 'MBA',
-    achievement: 'тест', salary: 90_000, tagline: '',
+    achievement: { uk: 'тест', ru: 'тест' }, salary: 90_000, tagline: { uk: '', ru: '' },
   }))
   const proTeam: Record<string, string | null> = { ...EMPTY_TEAM }
   POSTS.forEach((p, i) => { proTeam[p.id] = proTypes[i] })
   const proRep = buildReport(proTeam, {}, undefined, proPool)
   check('профессионально сильная команда отмечена в отчёте',
-    proRep.avgProf === 90 && proRep.strengths.some((s) => s.includes('рациональн')),
+    proRep.avgProf === 90 && proRep.strengths.some((s) => s.ru.includes('рациональн')),
     `— avgProf ${proRep.avgProf}`)
 
   // …а слабые досье (не в своей сфере, без образования) — предупреждение
@@ -455,7 +456,7 @@ check('пустая команда: сплочённость 50', cohesion({ ...
     ...c, years: 1, education: 'Профкурсы', profession: POSTS[(i + 3) % POSTS.length].id,
   })))
   check('низкий профуровень отмечен как риск',
-    weakRep.avgProf < 55 && weakRep.risks.some((r) => r.includes('Профессиональный уровень невысок')),
+    weakRep.avgProf < 55 && weakRep.risks.some((r) => r.ru.includes('Профессиональный уровень невысок')),
     `— avgProf ${weakRep.avgProf}`)
 
   // ФОТ выше бюджета — риск и штраф к overall
@@ -463,7 +464,7 @@ check('пустая команда: сплочённость 50', cohesion({ ...
   const expensiveRep = buildReport(proTeam, {}, undefined, expensivePool)
   check('перерасход ФОТ замечен (8×114 тыс. = 912 тыс. при бюджете 800 тыс.)',
     expensiveRep.payrollOver === 14, `— ${expensiveRep.payrollOver}%`)
-  check('риск про ФОТ сформулирован', expensiveRep.risks.some((r) => r.includes('ФОТ')))
+  check('риск про ФОТ сформулирован', expensiveRep.risks.some((r) => r.ru.includes('ФОТ')))
   check('штраф за ФОТ уменьшает overall на 7 очков',
     expensiveRep.overall === Math.max(0, Math.min(100,
       Math.round(0.5 * expensiveRep.avgCrisis + 0.25 * expensiveRep.avgFit + 0.25 * expensiveRep.cohesionValue) - 7)))
@@ -475,7 +476,7 @@ section('15) Режимы рынка заданы корректно')
 check('три режима', Object.keys(MARKET_MODES).length === 3)
 check('изобилие 12 / обычный 10 / голод 8',
   MARKET_MODES.plenty.size === 12 && MARKET_MODES.normal.size === 10 && MARKET_MODES.drought.size === 8)
-check('все режимы с подписями', Object.values(MARKET_MODES).every((m) => m.label.length > 0 && m.hint.length > 0))
+check('все режимы с подписями', Object.values(MARKET_MODES).every((m) => m.label.ru.length > 0 && m.hint.ru.length > 0))
 check('весовые коэффициенты позиций модели А на месте',
   POSITION_WEIGHTS[1] === 100 && POSITION_WEIGHTS[2] === 80 && POSITION_WEIGHTS[4] === 5)
 
