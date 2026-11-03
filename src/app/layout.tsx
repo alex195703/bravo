@@ -13,10 +13,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "«Браво» — соционический симулятор торговой сети",
+  title: "«Браво» — соціонічний симулятор торгової мережі",
   description:
-    "Игра-симулятор: вы владелец сети продуктовых магазинов «Браво». На рынке труда нет всех 16 типов соционики — набирайте команду из того, что есть, и проводите её через бизнес-кризисы.",
-  keywords: ["соционика", "симулятор", "сеть магазинов", "управление командой", "интертипные отношения", "бизнес-игра"],
+    "Гра-симулятор: ви власник мережі продуктових магазинів «Браво». На ринку праці немає всіх 16 типів соціоніки — набирайте команду з того, що є, і проводьте її крізь бізнес-кризи.",
+  keywords: ["соціоніка", "симулятор", "мережа магазинів", "управління командою", "інтертипні стосунки", "бізнес-гра"],
 };
 
 export default function RootLayout({
@@ -25,7 +25,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ru" suppressHydrationWarning>
+    <html lang="uk" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
