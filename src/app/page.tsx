@@ -19,7 +19,7 @@
 // ============================================================
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useL, useBi, useLang, LangSwitch, type Bi } from '@/lib/i18n'
+import { useL, useBi, useLang, LangSwitch, type Bi, useTitle } from '@/lib/i18n'
 import { TYPES, QUADRAS, type QuadraId } from '@/lib/socionics-data'
 import { QUADRA_COLORS, RELATION_LABEL } from '@/lib/relations'
 import { typeByRu, label } from '@/lib/socionics-quiz'
@@ -250,6 +250,8 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
 
 export default function BravoSimulator() {
   const [phase, setPhase] = useState<Phase>('intro')
+  useTitle('«Браво» — соціонічний симулятор торгової мережі', '«Браво» — соционический симулятор торговой сети')
+
   const [game, setGame] = useState<LiveGame | null>(null)
   const [note, setNote] = useState<MonthEvent | null>(null)
   const [sel, setSel] = useState<{ ru: string; postId: string } | null>(null)
