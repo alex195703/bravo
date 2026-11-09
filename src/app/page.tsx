@@ -250,7 +250,7 @@ function restoreLiveGame(parsed: Partial<LiveGame>): LiveGame | null {
 
 export default function BravoSimulator() {
   const [phase, setPhase] = useState<Phase>('intro')
-  useTitle('«Браво» — соціонічний симулятор торгової мережі', '«Браво» — соционический симулятор торговой сети')
+  useTitle('«Браво» — соціонічний симулятор торгової мережі · проф. Орлова О.В.', '«Браво» — соционический симулятор торговой сети · проф. Орлова А.В.')
 
   const [game, setGame] = useState<LiveGame | null>(null)
   const [note, setNote] = useState<MonthEvent | null>(null)
@@ -1885,6 +1885,9 @@ function Disclaimer() {
         {' '}{L('дискусійна типологія особистості, не науковий інструмент відбору персоналу.', 'дискуссионная типология личности, не научный инструмент отбора персонала.')}
         {' '}{L('Теорія закріплюється в тренажері «Соціоніка» (socionika.zip),', 'Теория закрепляется в тренажёре «Соционика» (socionika.zip),')}
         {' '}{L('кабінет міністрів живе в ministerstvo.zip.', 'кабинет министров живёт в ministerstvo.zip.')}
+        <div className="mt-2 font-semibold text-slate-500">
+          🎓 {L('Автор і розробник — професор Орлов О.В.', 'Автор и разработчик — профессор Орлов А.В.')}
+        </div>
       </div>
     </footer>
   )
